@@ -1,0 +1,28 @@
+smarttraffic-multimodal-ai/
+├── requirements.txt              # 依賴套件
+├── main.py                      # 主程式入口
+├── config.py                    # 系統配置
+├── multimodal/                  # 多模態數據處理
+│   ├── __init__.py
+│   ├── data_fusion.py          # 多模態數據融合
+│   ├── text_processor.py       # 文本數據處理
+│   ├── image_processor.py      # 影像數據處理
+│   └── sensor_processor.py     # 感測器數據處理
+├── reinforcement_learning/      # 強化學習模組
+│   ├── __init__.py
+│   ├── fed_ppo_agent.py        # 聯邦PPO智能體
+│   ├── marl_environment.py     # 多智能體環境
+│   └── graph_network.py        # 圖神經網路
+├── traffic_simulation/          # 交通模擬
+│   ├── __init__.py
+│   ├── sumo_interface.py       # SUMO模擬器介面
+│   └── traffic_generator.py    # 交通流量生成
+├── web_interface/              # 網頁介面
+│   ├── app.py                  # Streamlit應用
+│   └── components/             # UI組件
+├── deployment/                 # 部署配置
+│   ├── Dockerfile
+│   └── kubernetes/
+└── experiments/                # 實驗與評估
+    ├── training.py
+    └── evaluation.py
