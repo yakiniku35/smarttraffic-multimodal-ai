@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field  # 記得加 field
 from typing import Dict, List, Tuple
 
 @dataclass
@@ -31,12 +31,12 @@ class TrafficConfig:
 @dataclass
 class SystemConfig:
     """系統總配置"""
-    multimodal: MultimodalConfig = MultimodalConfig()
-    rl: RLConfig = RLConfig()
-    traffic: TrafficConfig = TrafficConfig()
+    multimodal: MultimodalConfig = field(default_factory=MultimodalConfig)
+    rl: RLConfig = field(default_factory=RLConfig)
+    traffic: TrafficConfig = field(default_factory=TrafficConfig)
     
     # API配置
-    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    openai_api_key: str = ""
     
     # 路徑配置
     data_dir: str = "data/"
