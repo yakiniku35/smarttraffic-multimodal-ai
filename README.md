@@ -129,6 +129,7 @@ See [LICENSE](LICENSE) for details.
 
 ---
 📬 Connect with me
+
 [Connect with me on Twitter](https://x.com/Peyerchiu1)
 
 [Connect with me on LinkedIn](www.linkedin.com/in/yen-chia-chiu-a3a8a6212)
