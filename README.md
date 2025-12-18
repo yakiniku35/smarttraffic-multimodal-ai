@@ -128,7 +128,7 @@ See [LICENSE](LICENSE) for details.
 - [Multimodal AI Examples & Real-World Applications (SmartDev)](https://smartdev.com/multimodal-ai-examples-how-it-works-real-world-applications-and-future-trends/)
 
 ---
-Connect with me
+## Connect with me
 
 [Connect with me on Twitter](https://x.com/Peyerchiu1)
 
