@@ -4,13 +4,13 @@
 
 ---
 
-## 🚦 Project Overview
+##Project Overview
 
 SmartTraffic Multimodal AI is an advanced smart city solution that leverages multimodal data and cutting-edge AI techniques to optimize urban traffic flow in real time. By integrating traffic camera images, GPS trajectories, weather data, and social media feeds, the system dynamically adjusts traffic signals, predicts congestion, and recommends optimal routes to minimize travel time and reduce emissions.
 
 ---
 
-## ✨ Key Features
+##Key Features
 
 - **Multimodal Data Fusion:** Integrates real-time data from cameras, GPS, IoT sensors, and weather APIs.
 - **Federated Multi-Agent Reinforcement Learning:** Decentralized AI agents collaboratively optimize traffic signals using Fed-PPO.
@@ -21,7 +21,7 @@ SmartTraffic Multimodal AI is an advanced smart city solution that leverages mul
 
 ---
 
-## 🛠️ Tech Stack
+##Tech Stack
 
 - **Python 3.10+**
 - **PyTorch, PyTorch Geometric** (GNNs)
@@ -32,7 +32,7 @@ SmartTraffic Multimodal AI is an advanced smart city solution that leverages mul
 
 ---
 
-## 🚀 Installation
+##Installation
 
 1. **Clone the repository**
 
@@ -67,14 +67,14 @@ SmartTraffic Multimodal AI is an advanced smart city solution that leverages mul
 
 ---
 
-## 🖥️ Usage
+##Usage
 
 - Access the real-time dashboard at `http://localhost:8501`
 - Start/stop traffic optimization, visualize traffic metrics, and analyze system performance.
 
 ---
 
-## 📦 Repository Structure
+##Repository Structure
 
 ```txt
 smarttraffic-multimodal-ai/
@@ -92,20 +92,20 @@ smarttraffic-multimodal-ai/
 
 ---
 
-## 🤝 Contributing
+##Contributing
 
 Contributions are welcome! Please open issues or submit pull requests for improvements, bug fixes, or new features.
 
 ---
 
-## 📄 License
+##License
 
 This project is licensed under the **Apache License 2.0**.  
 See [LICENSE](LICENSE) for details.
 
 ---
 
-## 📚 Acknowledgements
+##Acknowledgements
 
 - [PyTorch](https://pytorch.org/)
 - [Hugging Face Transformers](https://huggingface.co/transformers/)
@@ -128,7 +128,7 @@ See [LICENSE](LICENSE) for details.
 - [Multimodal AI Examples & Real-World Applications (SmartDev)](https://smartdev.com/multimodal-ai-examples-how-it-works-real-world-applications-and-future-trends/)
 
 ---
-📬 Connect with me
+Connect with me
 
 [Connect with me on Twitter](https://x.com/Peyerchiu1)
 
