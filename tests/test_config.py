@@ -1,0 +1,153 @@
+"""config.py 的單元測試。"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from config import MultimodalConfig, RLConfig, SystemConfig, TrafficConfig, UIConfig
+
+
+def test_default_config_is_valid():
+    """預設設定本身就應該是合法的。"""
+    SystemConfig().validate()
+
+
+def test_sub_configs_are_independent():
+    """每個 SystemConfig 實例都要有自己的子設定物件。
+
+    這是 dataclass 用 field(default_factory=...) 要防的經典陷阱：
+    直接寫 `multimodal: MultimodalConfig = MultimodalConfig()` 的話，
+    所有實例會共用同一個物件，改了一個就會全部一起變。
+    """
+    a, b = SystemConfig(), SystemConfig()
+    a.rl.learning_rate = 0.5
+
+    assert b.rl.learning_rate != 0.5
+    assert a.multimodal is not b.multimodal
+
+
+def test_traffic_config_has_use_gui():
+    """sumo_interface.py 會讀 config.use_gui，之前這個欄位不存在。"""
+    assert hasattr(TrafficConfig(), "use_gui")
+    assert TrafficConfig().use_gui is False
+
+
+def test_rl_config_has_state_and_action_dim():
+    """state_dim / action_dim 以前是在 main.py 動態塞進去的。"""
+    rl = RLConfig()
+    assert rl.state_dim > 0
+    assert rl.action_dim > 0
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"embedding_dim": 0}, "embedding_dim"),
+        ({"embedding_dim": 100, "num_attention_heads": 8}, "整除"),
+        ({"dropout": 1.5}, "dropout"),
+    ],
+)
+def test_multimodal_validation_rejects_bad_values(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        MultimodalConfig(**kwargs).validate()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"learning_rate": -1},
+        {"batch_size": 0},
+        {"clip_range": 1.5},
+        {"gamma": 0},
+        {"state_dim": 0},
+    ],
+)
+def test_rl_validation_rejects_bad_values(kwargs):
+    with pytest.raises(ValueError):
+        RLConfig(**kwargs).validate()
+
+
+def test_ui_validation_rejects_unknown_theme():
+    with pytest.raises(ValueError, match="theme"):
+        UIConfig(theme="rainbow").validate()
+
+
+def test_round_trip_through_dict():
+    """to_dict 之後再 from_dict，內容要完全一樣。"""
+    original = SystemConfig()
+    original.rl.learning_rate = 0.001
+    original.ui.theme = "dark"
+    original.traffic.num_intersections = 25
+
+    restored = SystemConfig.from_dict(original.to_dict())
+
+    assert restored.to_dict() == original.to_dict()
+    assert restored.rl.learning_rate == 0.001
+    assert restored.ui.theme == "dark"
+
+
+def test_from_dict_ignores_unknown_keys():
+    """設定檔裡多出來的鍵應該被忽略，而不是讓程式炸掉。"""
+    data = SystemConfig().to_dict()
+    data["這是什麼"] = 123
+    data["rl"]["未知參數"] = "abc"
+
+    config = SystemConfig.from_dict(data)
+    assert config.rl.learning_rate == RLConfig().learning_rate
+
+
+def test_from_dict_fills_missing_sections():
+    """缺少的區塊要自動補上預設值。"""
+    config = SystemConfig.from_dict({"rl": {"batch_size": 64}})
+
+    assert config.rl.batch_size == 64
+    assert config.ui.theme == UIConfig().theme
+
+
+def test_save_and_load(tmp_path):
+    path = tmp_path / "nested" / "config.json"
+
+    config = SystemConfig()
+    config.ui.chart_height = 500
+    saved_path = config.save(path)
+
+    assert saved_path.exists()
+    loaded = SystemConfig.load(path)
+    assert loaded.ui.chart_height == 500
+
+
+def test_load_missing_file_returns_defaults(tmp_path):
+    """檔案不存在時回傳預設值，不應該丟出例外。"""
+    loaded = SystemConfig.load(tmp_path / "does_not_exist.json")
+    assert loaded.to_dict() == SystemConfig().to_dict()
+
+
+def test_load_broken_json_raises(tmp_path):
+    """但檔案存在卻是壞的，就要誠實報錯，不要安靜吞掉。"""
+    path = tmp_path / "broken.json"
+    path.write_text("{ 這不是 JSON", encoding="utf-8")
+
+    with pytest.raises(json.JSONDecodeError):
+        SystemConfig.load(path)
+
+
+def test_api_keys_come_from_environment(monkeypatch):
+    """金鑰只從環境變數讀，而且不會出現在 to_dict() 裡。"""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123")
+    config = SystemConfig()
+
+    assert config.openai_api_key == "sk-test-123"
+    assert config.api_key_status()["OPENAI_API_KEY"] is True
+    assert "sk-test-123" not in json.dumps(config.to_dict())
+
+
+def test_ensure_directories(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    config = SystemConfig()
+    config.ensure_directories()
+
+    for name in (config.data_dir, config.model_dir, config.log_dir, config.config_dir):
+        assert (tmp_path / name).is_dir()

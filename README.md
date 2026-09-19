@@ -4,7 +4,7 @@
 
 ---
 
-##Project Overview
+## Project Overview
 
 SmartTraffic Multimodal AI is an advanced smart city solution that leverages multimodal data and cutting-edge AI techniques to optimize urban traffic flow in real time. By integrating traffic camera images, GPS trajectories, weather data, and social media feeds, the system dynamically adjusts traffic signals, predicts congestion, and recommends optimal routes to minimize travel time and reduce emissions.
 
@@ -54,8 +54,12 @@ SmartTraffic Multimodal AI is an advanced smart city solution that leverages mul
    pip install -r requirements.txt
    ```
 
-4. **Install SUMO and set up environment variables**  
+4. **(Optional) Install SUMO**  
    [SUMO download & setup guide](https://sumo.dlr.de/docs/Downloads.html)
+
+   SUMO is **not required to get started**. If `traci` is unavailable, the
+   system automatically falls back to a built-in `MockTrafficEnvironment`,
+   so you can run training, the dashboard, and the tests straight away.
 
 5. **Run the main application**
 
@@ -69,8 +73,57 @@ SmartTraffic Multimodal AI is an advanced smart city solution that leverages mul
 
 ## Usage
 
-- Access the real-time dashboard at `http://localhost:8501`
-- Start/stop traffic optimization, visualize traffic metrics, and analyze system performance.
+```bash
+python main.py --mode web                      # dashboard (default) at localhost:8501
+python main.py --mode train --episodes 100     # train
+python main.py --mode train --mock-env         # train without SUMO installed
+python main.py --mode inference                # run the saved best model
+python main.py --config configs/system_config.json --mode train
+python main.py --help                          # all options
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--mode` | `train` / `inference` / `web` |
+| `--config` | Path to a JSON config file |
+| `--episodes` | Number of training episodes |
+| `--port` | Dashboard port (default `8501`) |
+| `--seed` | Random seed for reproducible runs |
+| `--mock-env` | Force the built-in simulator, skipping SUMO |
+| `--log-level` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+
+### Dashboard
+
+Five tabs: **即時監控** (live monitoring), **AI 模型** (model status),
+**交通控制** (signal control), **效能分析** (analytics) and **系統設定** (settings).
+
+The settings tab is bound to `SystemConfig`: every control validates its input,
+applies atomically via a form, and can be written to `configs/system_config.json`,
+reloaded, reset to defaults, or exported/imported as JSON.
+
+### API keys
+
+Keys are read from environment variables only — they are never written to the
+config file, so they cannot be committed by accident. Create a `.env`
+(already git-ignored) or export them directly:
+
+```bash
+export OPENAI_API_KEY=sk-...
+export WEATHER_API_KEY=...
+export MAPS_API_KEY=...
+```
+
+---
+
+## Running the tests
+
+```bash
+pip install pytest
+pytest -q
+```
+
+Tests that need PyTorch or PyTorch Geometric skip automatically when those
+packages are not installed, so the suite runs on a minimal environment too.
 
 ---
 
@@ -78,16 +131,27 @@ SmartTraffic Multimodal AI is an advanced smart city solution that leverages mul
 
 ```txt
 smarttraffic-multimodal-ai/
-├── main.py
-├── config.py
+├── main.py                       # CLI entry point (train / inference / web)
+├── config.py                     # dataclass config + JSON load/save + validation
 ├── requirements.txt
+├── .streamlit/config.toml        # Streamlit theme & server options
 ├── multimodal/
+│   └── data_fusion.py            # text + image + sensor attention fusion
 ├── reinforcement_learning/
+│   └── fed_ppo_agent.py          # GNN-based PPO agent + federated averaging
 ├── traffic_simulation/
+│   └── sumo_interface.py         # SUMO env + mock fallback env
 ├── web_interface/
-├── models/
-├── data/
-└── logs/
+│   ├── app.py                    # dashboard layout
+│   ├── theme.py                  # CSS tokens, light/dark palettes
+│   ├── data_source.py            # deterministic demo data
+│   └── components/
+│       ├── metrics.py            # metric rows & status cards
+│       └── settings_panel.py     # the settings tab
+├── tests/                        # pytest suite
+├── models/                       # saved checkpoints (git-ignored)
+├── data/                         # datasets (git-ignored)
+└── logs/                         # run logs (git-ignored)
 ```
 
 ---
