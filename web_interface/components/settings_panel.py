@@ -518,7 +518,6 @@ def _render_persistence_section(config: SystemConfig) -> None:
             uploaded.size,
         )
         if st.session_state.get(IMPORTED_FILE_KEY) != file_id:
-            st.session_state[IMPORTED_FILE_KEY] = file_id
             try:
                 data = json.loads(uploaded.getvalue().decode("utf-8"))
                 # `[1,2]`、`"abc"`、`null` 都是合法 JSON，但 from_dict 會對它們
@@ -528,6 +527,10 @@ def _render_persistence_section(config: SystemConfig) -> None:
                 imported = SystemConfig.from_dict(data)
                 ok, message = _apply(imported)
                 if ok:
+                    # 一定要等真的成功才記錄，不能在 try 之前就先記。
+                    # 提早記的話，內容有問題的檔案會被當成「已匯入」，
+                    # 下一次 rerun 就跑到 else 分支謊報匯入成功。
+                    st.session_state[IMPORTED_FILE_KEY] = file_id
                     st.success("設定已匯入，記得按「寫入設定檔」才會永久保存。")
                     st.rerun()
                 else:
