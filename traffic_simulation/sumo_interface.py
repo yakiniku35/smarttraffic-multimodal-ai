@@ -143,15 +143,24 @@ class SUMOTrafficEnvironment(BaseTrafficEnvironment):
         traci.start(sumo_cmd)
         self._connected = True
 
-        self.traffic_lights = list(traci.trafficlight.getIDList())
-        self.detectors = list(traci.inductionloop.getIDList())
+        # 連線建立之後只要有任何一步失敗，都要把 sumo 關掉再把例外丟出去，
+        # 否則呼叫端（例如 create_environment 的 fallback）會留下一個
+        # 沒人管的 sumo 行程，下次 traci.start 就會連不上。
+        try:
+            self.traffic_lights = list(traci.trafficlight.getIDList())
+            self.detectors = list(traci.inductionloop.getIDList())
 
-        # 先把不會變動的資訊快取起來
-        for tl_id in self.traffic_lights:
-            self._controlled_lanes[tl_id] = tuple(
-                dict.fromkeys(traci.trafficlight.getControlledLanes(tl_id))
-            )
-            self._phase_counts[tl_id] = self._query_phase_count(tl_id)
+            # 先把不會變動的資訊快取起來
+            self._controlled_lanes.clear()
+            self._phase_counts.clear()
+            for tl_id in self.traffic_lights:
+                self._controlled_lanes[tl_id] = tuple(
+                    dict.fromkeys(traci.trafficlight.getControlledLanes(tl_id))
+                )
+                self._phase_counts[tl_id] = self._query_phase_count(tl_id)
+        except Exception:
+            self.close()
+            raise
 
         logger.info(
             "SUMO 初始化完成：%d 個號誌、%d 個偵測器",

@@ -27,6 +27,12 @@ from config import DEFAULT_CONFIG_PATH, SystemConfig
 # session_state 用到的鍵，集中管理避免打錯字
 CONFIG_KEY = "system_config"
 SAVED_SNAPSHOT_KEY = "saved_config_snapshot"
+# 記住「哪一個上傳的檔案已經匯入過了」，避免每次 rerun 重複套用
+IMPORTED_FILE_KEY = "imported_config_file"
+
+# 「重置系統」時要保留的鍵（設定本身與存檔快照要一起留，
+# 否則重置後會一直誤報「尚未寫入檔案」）
+PRESERVED_KEYS = (CONFIG_KEY, SAVED_SNAPSHOT_KEY)
 
 
 # --------------------------------------------------------------------------- #
@@ -64,6 +70,19 @@ def _apply(config: SystemConfig) -> Tuple[bool, str]:
 
     st.session_state[CONFIG_KEY] = config
     return True, "設定已套用（尚未寫入檔案）"
+
+
+def _options_including(options: list, current) -> list:
+    """確保 ``current`` 一定在選項裡。
+
+    ``st.select_slider`` 的預設值只要不在 options 裡就會直接丟出
+    ``ValueError``，整個分頁就打不開了。設定檔是可以手動編輯、也可以
+    匯入的，值不在清單裡很正常（例如 MiniLM 原生的 384 維），
+    所以把它補進選項而不是讓介面壞掉。
+    """
+    if current in options:
+        return options
+    return sorted({*options, current})
 
 
 # --------------------------------------------------------------------------- #
@@ -174,13 +193,17 @@ def _render_multimodal_section(config: SystemConfig) -> None:
         with col1:
             embedding_dim = st.select_slider(
                 "嵌入向量維度",
-                options=[128, 256, 512, 768, 1024],
+                options=_options_including(
+                    [128, 256, 512, 768, 1024], config.multimodal.embedding_dim
+                ),
                 value=int(config.multimodal.embedding_dim),
                 help="三種模態會先被投影到這個共同維度再融合。",
             )
             num_heads = st.select_slider(
                 "注意力頭數",
-                options=[1, 2, 4, 8, 16],
+                options=_options_including(
+                    [1, 2, 4, 8, 16], config.multimodal.num_attention_heads
+                ),
                 value=int(config.multimodal.num_attention_heads),
                 help="必須能整除嵌入維度，否則 PyTorch 會報錯。",
             )
@@ -455,19 +478,37 @@ def _render_persistence_section(config: SystemConfig) -> None:
     )
 
     uploaded = st.file_uploader("⬆️ 匯入設定 JSON", type=["json"])
-    if uploaded is not None:
-        try:
-            data = json.loads(uploaded.getvalue().decode("utf-8"))
-            imported = SystemConfig.from_dict(data)
-            ok, message = _apply(imported)
-            if ok:
-                st.success("設定已匯入，記得按「寫入設定檔」才會永久保存。")
-            else:
-                st.error(message)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            st.error(f"這不是有效的 JSON 檔：{exc}")
-        except TypeError as exc:
-            st.error(f"設定內容有問題：{exc}")
+    if uploaded is None:
+        # 使用者把檔案移除了，下次再上傳同一個檔案還是要能匯入
+        st.session_state.pop(IMPORTED_FILE_KEY, None)
+    else:
+        # 上傳的檔案會一直留在 uploader 裡，每次 rerun 都拿得到。
+        # 如果不記住「這個檔案已經匯入過了」，使用者之後在別的區塊
+        # 調整的設定都會被這裡重新套用的舊內容蓋掉。
+        file_id = getattr(uploaded, "file_id", None) or (
+            uploaded.name,
+            uploaded.size,
+        )
+        if st.session_state.get(IMPORTED_FILE_KEY) != file_id:
+            st.session_state[IMPORTED_FILE_KEY] = file_id
+            try:
+                data = json.loads(uploaded.getvalue().decode("utf-8"))
+                imported = SystemConfig.from_dict(data)
+                ok, message = _apply(imported)
+                if ok:
+                    st.success("設定已匯入，記得按「寫入設定檔」才會永久保存。")
+                    st.rerun()
+                else:
+                    st.error(message)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                st.error(f"這不是有效的 JSON 檔：{exc}")
+            except TypeError as exc:
+                st.error(f"設定內容有問題：{exc}")
+        else:
+            st.success(
+                f"已匯入 `{uploaded.name}`，記得按「寫入設定檔」才會永久保存"
+                "（移除上傳的檔案後可以重新匯入）。"
+            )
 
     with st.expander("查看目前的完整設定"):
         st.json(config.to_dict())

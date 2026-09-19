@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from web_interface.components.metrics import (  # noqa: E402
     source_badges,
 )
 from web_interface.components.settings_panel import (  # noqa: E402
+    PRESERVED_KEYS,
     get_config,
     render_settings_tab,
 )
@@ -140,11 +142,15 @@ def render_sidebar(config) -> None:
             st.rerun()
 
         if st.button("♻️ 重置系統", width="stretch"):
-            # 重置時把狀態清掉，但保留使用者調好的設定
-            saved_config = st.session_state.get("system_config")
+            # 重置時把狀態清掉，但保留使用者調好的設定。
+            # 存檔快照也要一起保留，否則「系統設定」會一直誤報尚未寫入檔案。
+            preserved = {
+                key: st.session_state[key]
+                for key in PRESERVED_KEYS
+                if key in st.session_state
+            }
             st.session_state.clear()
-            if saved_config is not None:
-                st.session_state["system_config"] = saved_config
+            st.session_state.update(preserved)
             init_session_state()
             log_event("系統已重置", "warning")
             st.rerun()
@@ -564,6 +570,13 @@ def main() -> None:
         render_analytics_tab(config, template)
     with tabs[4]:
         render_settings_page(config)
+
+    # 「自動更新資料」以前只是個沒有作用的開關，這裡讓它真的會動：
+    # 等待設定的秒數之後把刻度 +1 並重新執行，等同於自己按「更新資料」。
+    if config.ui.auto_refresh:
+        time.sleep(max(1, int(config.ui.refresh_interval_s)))
+        refresh_data()
+        st.rerun()
 
 
 if __name__ == "__main__":

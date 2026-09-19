@@ -55,14 +55,23 @@ def setup_logging(config: SystemConfig) -> None:
 
 
 def set_seed(seed: Optional[int]) -> None:
-    """固定亂數種子，讓實驗結果可以重現。"""
+    """固定亂數種子，讓實驗結果可以重現。
+
+    只想跑網頁介面的人不一定會安裝 PyTorch（光是 torch 就好幾 GB），
+    所以 torch 的種子是「有裝才設」，沒裝也不會讓 `--mode web` 掛掉。
+    """
     if seed is None:
         return
 
-    import torch
-
     random.seed(seed)
     np.random.seed(seed)
+
+    try:
+        import torch
+    except ImportError:
+        logger.debug("未安裝 PyTorch，略過 torch 的亂數種子設定")
+        return
+
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
@@ -115,6 +124,11 @@ def train_system(
             state, edge_index = state.to(device), edge_index.to(device)
             episode_reward = 0.0
 
+            # 收集經驗時要關掉 dropout，否則存下來的 log 機率是「被 dropout
+            # 擾動過的策略」算出來的，PPO 更新時重新評估的機率對不上，
+            # 重要性取樣比值一開始就不是 1，梯度會被雜訊帶偏。
+            agent.eval()
+
             for _ in range(config.traffic.simulation_time):
                 with torch.no_grad():
                     action, action_logprob, state_value = agent.get_action_and_value(
@@ -143,6 +157,7 @@ def train_system(
                 if any(dones):
                     break
 
+            agent.train()  # 更新時才需要 dropout
             loss_info = agent.update()
             if loss_info:
                 logger.info(
