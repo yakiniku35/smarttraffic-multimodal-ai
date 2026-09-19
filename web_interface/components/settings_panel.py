@@ -29,6 +29,8 @@ CONFIG_KEY = "system_config"
 SAVED_SNAPSHOT_KEY = "saved_config_snapshot"
 # 記住「哪一個上傳的檔案已經匯入過了」，避免每次 rerun 重複套用
 IMPORTED_FILE_KEY = "imported_config_file"
+# 開啟頁面時讀取設定檔失敗的警告訊息
+LOAD_WARNING_KEY = "config_load_warning"
 
 # 「重置系統」時要保留的鍵（設定本身與存檔快照要一起留，
 # 否則重置後會一直誤報「尚未寫入檔案」）
@@ -38,14 +40,37 @@ PRESERVED_KEYS = (CONFIG_KEY, SAVED_SNAPSHOT_KEY)
 # --------------------------------------------------------------------------- #
 # session_state 輔助
 # --------------------------------------------------------------------------- #
+def _load_validated(path) -> Tuple[SystemConfig, str]:
+    """從檔案讀設定並驗證，回傳 (設定, 警告訊息)。
+
+    設定檔是可以手動編輯的，內容壞掉（JSON 語法錯、數值不合法、
+    權限不足）都有可能。這些情況一律退回預設值並附上說明，
+    而不是讓整個網頁介面白屏。
+    """
+    try:
+        config = SystemConfig.load(path)
+    except (OSError, json.JSONDecodeError) as exc:
+        return SystemConfig(), f"讀取 {path} 失敗，已改用預設值：{exc}"
+    except TypeError as exc:
+        return SystemConfig(), f"{path} 的內容格式不對，已改用預設值：{exc}"
+
+    try:
+        config.validate()
+    except ValueError as exc:
+        return SystemConfig(), f"{path} 裡有不合法的設定，已改用預設值：{exc}"
+
+    return config, ""
+
+
 def get_config() -> SystemConfig:
     """取得目前這個瀏覽器工作階段的設定。"""
     if CONFIG_KEY not in st.session_state:
-        config = SystemConfig.load(DEFAULT_CONFIG_PATH)
+        config, warning = _load_validated(DEFAULT_CONFIG_PATH)
         st.session_state[CONFIG_KEY] = config
         st.session_state[SAVED_SNAPSHOT_KEY] = json.dumps(
             config.to_dict(), sort_keys=True
         )
+        st.session_state[LOAD_WARNING_KEY] = warning
     return st.session_state[CONFIG_KEY]
 
 
@@ -457,12 +482,15 @@ def _render_persistence_section(config: SystemConfig) -> None:
 
     with col2:
         if st.button("↩️ 重新載入檔案", width="stretch"):
-            try:
-                st.session_state[CONFIG_KEY] = SystemConfig.load(config_path)
+            # 和開啟頁面時走同一條「讀取 + 驗證」的路徑，
+            # 檔案被手動改壞也只會看到訊息，不會整頁當掉
+            loaded, warning = _load_validated(config_path)
+            if warning:
+                st.error(warning)
+            else:
+                st.session_state[CONFIG_KEY] = loaded
                 _mark_saved()
                 st.rerun()
-            except (OSError, json.JSONDecodeError) as exc:
-                st.error(f"讀取失敗：{exc}")
 
     with col3:
         if st.button("🔄 回復預設值", width="stretch"):
@@ -493,6 +521,10 @@ def _render_persistence_section(config: SystemConfig) -> None:
             st.session_state[IMPORTED_FILE_KEY] = file_id
             try:
                 data = json.loads(uploaded.getvalue().decode("utf-8"))
+                # `[1,2]`、`"abc"`、`null` 都是合法 JSON，但 from_dict 會對它們
+                # 呼叫 .get() 而丟出 AttributeError；沒先擋下來整頁就會炸掉
+                if not isinstance(data, dict):
+                    raise TypeError("設定 JSON 的最外層必須是物件（{...}）")
                 imported = SystemConfig.from_dict(data)
                 ok, message = _apply(imported)
                 if ok:
@@ -530,6 +562,11 @@ def render_settings_tab() -> None:
             st.warning("尚未寫入檔案", icon="✏️")
         else:
             st.success("已與檔案同步", icon="✅")
+
+    # 開啟頁面時如果設定檔讀失敗，要讓使用者知道現在用的是預設值
+    load_warning = st.session_state.get(LOAD_WARNING_KEY)
+    if load_warning:
+        st.warning(load_warning, icon="⚠️")
 
     sections = st.tabs(["🧠 強化學習", "🔀 多模態", "🚗 交通模擬", "🎨 介面", "🔐 金鑰", "💾 儲存"])
 

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
@@ -287,6 +288,12 @@ class FederatedPPOAgent(nn.Module):
         else:
             if len(weights) != len(client_agents):
                 raise ValueError("weights 長度必須和 client_agents 相同")
+            # 只檢查總和是不夠的：
+            #   [-1, 2] 的總和是 1，但負權重會把參數外推到所有地區模型之外
+            #   [nan, 1] 的總和是 nan，`total <= 0` 判斷為 False 也會通過，
+            #   然後把 nan 寫進全域模型，整個訓練就毀了
+            if any(not math.isfinite(w) or w < 0 for w in weights):
+                raise ValueError("weights 必須都是有限的非負數")
             total = float(sum(weights))
             if total <= 0:
                 raise ValueError("weights 總和必須大於 0")
@@ -317,7 +324,10 @@ class FederatedPPOAgent(nn.Module):
     def clone(self) -> "FederatedPPOAgent":
         """複製一份智能體，用來當作某個地區的本地模型。"""
         graph = getattr(self, "graph_structure", None)
-        clone = FederatedPPOAgent(copy.deepcopy(self.config), graph)
+        # nn.Module 一律在 CPU 上建立參數，load_state_dict 只複製數值、
+        # 不會搬動裝置。複製一個在 GPU 上的智能體如果不加 .to()，
+        # 拿到的會是 CPU 模型，之後跟 GPU 張量一起用就會裝置不符。
+        clone = FederatedPPOAgent(copy.deepcopy(self.config), graph).to(self.device)
         clone.load_state_dict(self.state_dict())
         return clone
 

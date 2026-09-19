@@ -151,3 +151,22 @@ def test_ensure_directories(tmp_path, monkeypatch):
 
     for name in (config.data_dir, config.model_dir, config.log_dir, config.config_dir):
         assert (tmp_path / name).is_dir()
+
+
+@pytest.mark.parametrize("payload", [[1, 2, 3], "abc", None, 42, 3.5])
+def test_from_dict_rejects_non_object_root(payload):
+    """`[1,2]`、`"abc"`、`null` 都是合法 JSON 但不是物件。
+
+    沒擋下來的話會在 data.get() 丟出看不懂的 AttributeError，
+    在網頁介面上就是整頁當掉。
+    """
+    with pytest.raises(TypeError, match="最外層必須是物件"):
+        SystemConfig.from_dict(payload)
+
+
+def test_load_non_object_root_raises_typeerror(tmp_path):
+    path = tmp_path / "list.json"
+    path.write_text("[1, 2, 3]", encoding="utf-8")
+
+    with pytest.raises(TypeError):
+        SystemConfig.load(path)

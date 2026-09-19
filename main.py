@@ -208,7 +208,11 @@ def run_inference(config: SystemConfig, use_mock_env: bool = False) -> None:
         )
 
     device = get_device()
-    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    # weights_only=True 只允許張量與基本型別，不會在反序列化時執行任意程式碼。
+    # model_dir 可以被設定檔指定，模型檔也可能是從別處下載的，
+    # 用安全模式載入才不會被惡意的 .pth 檔植入程式碼。
+    # 我們存的內容（state_dict、dict、int、float）都在允許範圍內。
+    checkpoint = torch.load(model_path, map_location=device, weights_only=True)
 
     env = create_environment(config.traffic, force_mock=use_mock_env)
 

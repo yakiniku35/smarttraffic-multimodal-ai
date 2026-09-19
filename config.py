@@ -236,7 +236,17 @@ class SystemConfig:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SystemConfig":
-        """從 dict 建立設定；不認識的鍵會被忽略，缺少的鍵用預設值。"""
+        """從 dict 建立設定；不認識的鍵會被忽略，缺少的鍵用預設值。
+
+        ``[1,2]``、``"abc"``、``null`` 都是合法的 JSON，但它們沒有
+        ``.get()``，直接往下走會丟出看不懂的 ``AttributeError``。
+        在這裡一次擋掉，所有呼叫端（讀檔、上傳）就都不用各自處理。
+        """
+        if not isinstance(data, dict):
+            raise TypeError(
+                f"設定內容的最外層必須是物件（{{...}}），收到 {type(data).__name__}"
+            )
+
         sub_configs = {
             "multimodal": MultimodalConfig,
             "rl": RLConfig,

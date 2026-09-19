@@ -159,3 +159,25 @@ def test_system_info_has_expected_keys():
 
     for key in ("系統版本", "CPU 使用率", "記憶體使用", "網路延遲"):
         assert key in info
+
+
+def test_snapshot_timestamp_is_caller_supplied():
+    """同一批資料重複取用時，「最後更新」時間不可以自己往前跑。
+
+    之前 build_live_snapshot 內部直接呼叫 datetime.now()，
+    畫面每重新執行一次就顯示一個新時間，看起來像有新資料進來。
+    """
+    fixed = datetime(2026, 1, 1, 12, 30, 0)
+
+    a = ds.build_live_snapshot(tick=3, seed=42, timestamp=fixed)
+    b = ds.build_live_snapshot(tick=3, seed=42, timestamp=fixed)
+
+    assert a == b  # 整個 dataclass 相等，包含時間戳
+    assert a.timestamp == fixed
+
+
+def test_snapshot_timestamp_defaults_to_now():
+    """沒有傳時間戳時仍然可用（維持向後相容）。"""
+    before = datetime.now()
+    snap = ds.build_live_snapshot(tick=0, seed=42)
+    assert before <= snap.timestamp <= datetime.now()

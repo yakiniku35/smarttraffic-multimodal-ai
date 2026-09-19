@@ -63,6 +63,8 @@ class MultimodalFusionNetwork(nn.Module):
         if self.freeze_text_encoder:
             for param in self.text_encoder.parameters():
                 param.requires_grad = False
+            # 同樣要切到 eval，否則 dropout 還是會作用在「凍結」的編碼器上
+            self.text_encoder.eval()
 
         # 投影層：把各模態原生的維度統一到 embedding_dim
         self.text_projection = nn.Linear(text_hidden, self.embedding_dim)
@@ -76,6 +78,11 @@ class MultimodalFusionNetwork(nn.Module):
         if config.freeze_image_encoder:
             for param in self.image_encoder.parameters():
                 param.requires_grad = False
+            # requires_grad=False 只凍結「權重」，不會凍結 BatchNorm 的
+            # running_mean / running_var ── 那兩個是 buffer，只要模組在
+            # train mode，每次 forward 都會被目前這批資料更新。
+            # 不額外呼叫 eval() 的話，「凍結」的編碼器其實還是會被改變。
+            self.image_encoder.eval()
 
         self.image_projection = nn.Linear(image_hidden, self.embedding_dim)
 
@@ -108,6 +115,22 @@ class MultimodalFusionNetwork(nn.Module):
             nn.Dropout(config.dropout),
             nn.Linear(256, config.output_dim),
         )
+
+    def train(self, mode: bool = True):
+        """切換訓練 / 評估模式。
+
+        覆寫的原因：之後任何一次 ``model.train()``（例如訓練迴圈裡的）
+        都會把所有子模組一起切回 train mode，被凍結的編碼器又會開始
+        更新 BatchNorm 統計量。這裡在切換完之後再把它壓回 eval。
+        """
+        super().train(mode)
+        # 用 self.config 而不是 self.freeze_*，因為 __init__ 還沒跑完時
+        # 那些屬性可能還不存在
+        if self.config.freeze_image_encoder:
+            self.image_encoder.eval()
+        if self.config.freeze_text_encoder:
+            self.text_encoder.eval()
+        return self
 
     # ------------------------------------------------------------------ #
     # 各模態編碼

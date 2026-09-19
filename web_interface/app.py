@@ -66,6 +66,9 @@ def init_session_state() -> None:
     """
     defaults = {
         "tick": 0,  # 資料刻度，+1 代表抓到一批新資料
+        # 這一批資料實際載入的時間。存在 session_state 裡而不是每次
+        # 現算，否則「最後更新」會在沒有新資料時也一直往前跳。
+        "tick_loaded_at": datetime.now(),
         "optimizer_running": False,
         "started_at": datetime.now(),
         "event_log": [],
@@ -89,6 +92,7 @@ def log_event(message: str, level: str = "info") -> None:
 def refresh_data() -> None:
     """抓下一批資料（把刻度 +1，所有圖表就會跟著更新）。"""
     st.session_state.tick += 1
+    st.session_state.tick_loaded_at = datetime.now()
 
 
 # --------------------------------------------------------------------------- #
@@ -192,7 +196,7 @@ def render_monitoring_tab(config, template: str) -> None:
     seed = config.traffic.random_seed or 0
     dp = config.ui.decimal_places
 
-    snapshot = ds.build_live_snapshot(tick, seed)
+    snapshot = ds.build_live_snapshot(tick, seed, st.session_state.tick_loaded_at)
 
     # 第一次載入時還沒有「上一批資料」可以比，就不要顯示 +0.0 的假變化量
     def delta(text: str) -> str | None:

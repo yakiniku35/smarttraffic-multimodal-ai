@@ -254,3 +254,45 @@ def test_should_sync_follows_interval(agent):
     agent.config.federated_sync_interval = 0
     agent.update_count = 3
     assert not agent.should_sync()
+
+
+def test_federated_average_rejects_negative_and_nan_weights(agent):
+    """只檢查總和是不夠的。
+
+    [-1, 2] 的總和剛好是 1，負權重會把參數外推到所有地區模型之外；
+    [nan, 1] 的總和是 nan，`total <= 0` 也判斷為 False，
+    結果是把 nan 寫進全域模型。
+    """
+    clients = [agent.clone(), agent.clone()]
+
+    for bad in ([-1.0, 2.0], [float("nan"), 1.0], [float("inf"), 1.0]):
+        with pytest.raises(ValueError, match="有限的非負數"):
+            agent.federated_average(clients, weights=bad)
+
+
+def test_federated_average_allows_zero_weight(agent):
+    """權重 0 是合理的（某個地區這輪沒有資料），不該被擋下來。"""
+    a, b = agent.clone(), agent.clone()
+    with torch.no_grad():
+        for p in a.parameters():
+            p.fill_(5.0)
+        for p in b.parameters():
+            p.fill_(1.0)
+
+    agent.federated_average([a, b], weights=[0.0, 1.0])
+    for p in agent.parameters():
+        assert torch.allclose(p, torch.full_like(p, 1.0))
+
+
+def test_clone_keeps_source_device(agent):
+    """clone() 要留在原本的裝置上。
+
+    nn.Module 一律在 CPU 建立參數，load_state_dict 只複製數值不搬裝置，
+    所以複製 GPU 模型時若少了 .to()，拿到的會是 CPU 模型。
+    """
+    clone = agent.clone()
+    assert clone.device == agent.device
+
+    if torch.cuda.is_available():  # pragma: no cover - CI 通常沒有 GPU
+        gpu_agent = agent.to("cuda")
+        assert gpu_agent.clone().device.type == "cuda"

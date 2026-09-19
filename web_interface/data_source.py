@@ -84,10 +84,16 @@ def build_traffic_history(seed: int = 42, hours: int = 24) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
-def build_live_snapshot(tick: int, seed: int = 42) -> LiveSnapshot:
+def build_live_snapshot(
+    tick: int, seed: int = 42, timestamp: datetime | None = None
+) -> LiveSnapshot:
     """依照目前的時間刻度產生一組即時指標。
 
     同一個 ``tick`` 一定得到同一組數字，所以頁面重新執行時不會亂跳。
+
+    ``timestamp`` 要由呼叫端傳入「這批資料實際載入的時間」。
+    如果在這裡直接用 ``datetime.now()``，畫面上的「最後更新」每次
+    重新執行都會變，看起來像有新資料進來，其實數字根本沒動。
     """
     rng = _rng(seed + tick)
     prev = _rng(seed + max(tick - 1, 0))
@@ -104,7 +110,7 @@ def build_live_snapshot(tick: int, seed: int = 42) -> LiveSnapshot:
     p_volume, p_speed, p_waiting, p_efficiency = sample(prev)
 
     return LiveSnapshot(
-        timestamp=datetime.now(),
+        timestamp=timestamp if timestamp is not None else datetime.now(),
         traffic_volume=volume,
         average_speed=speed,
         waiting_time=waiting,
