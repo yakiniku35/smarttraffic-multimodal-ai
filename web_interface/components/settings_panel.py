@@ -105,6 +105,8 @@ def _apply(config: SystemConfig) -> Tuple[bool, str]:
         return False, f"設定不合法：{exc}"
 
     st.session_state[CONFIG_KEY] = config
+    # 設定已經被換掉了，開機時那則「已改用預設值」的警告就不再成立
+    st.session_state.pop(LOAD_WARNING_KEY, None)
     return True, "設定已套用（尚未寫入檔案）"
 
 
@@ -517,12 +519,14 @@ def _render_persistence_section(config: SystemConfig) -> None:
                 st.error(warning)
             else:
                 st.session_state[CONFIG_KEY] = loaded
+                st.session_state.pop(LOAD_WARNING_KEY, None)
                 _mark_saved()
                 st.rerun()
 
     with col3:
         if st.button("🔄 回復預設值", width="stretch"):
             st.session_state[CONFIG_KEY] = SystemConfig()
+            st.session_state.pop(LOAD_WARNING_KEY, None)
             st.rerun()
 
     st.download_button(

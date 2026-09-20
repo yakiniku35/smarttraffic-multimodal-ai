@@ -222,6 +222,48 @@ class FederatedPPOAgent(nn.Module):
 
         totals = {"total": 0.0, "actor": 0.0, "critic": 0.0, "entropy": 0.0}
 
+        # 計算 PPO 損失時要關掉 dropout（但保留 autograd）。
+        # old_logprobs 是在 eval 模式下收集的；如果這裡用 train 模式重新評估，
+        # 每次都會抽到不同的 dropout mask，即使參數完全沒變，
+        # 重要性取樣比值也不會等於 1。實測 dropout=0.3 時第 0 輪的比值
+        # 落在 0.98～1.02（應該要剛好是 1），等於一開始就在對雜訊做裁切。
+        was_training = self.training
+        self.eval()
+        try:
+            self._run_ppo_epochs(
+                flat_states,
+                flat_edges,
+                flat_actions,
+                flat_old_logprobs,
+                flat_advantages,
+                flat_returns,
+                totals,
+            )
+        finally:
+            self.train(was_training)
+
+        self.memory.clear()
+        self.update_count += 1
+
+        n = self.config.n_epochs
+        return {
+            "total_loss": totals["total"] / n,
+            "actor_loss": totals["actor"] / n,
+            "critic_loss": totals["critic"] / n,
+            "entropy_loss": totals["entropy"] / n,
+        }
+
+    def _run_ppo_epochs(
+        self,
+        flat_states: torch.Tensor,
+        flat_edges: torch.Tensor,
+        flat_actions: torch.Tensor,
+        flat_old_logprobs: torch.Tensor,
+        flat_advantages: torch.Tensor,
+        flat_returns: torch.Tensor,
+        totals: Dict[str, float],
+    ) -> None:
+        """跑完 ``n_epochs`` 輪的 PPO 更新，把各項損失累加到 ``totals``。"""
         for _ in range(self.config.n_epochs):
             new_logprobs, new_values, entropy = self.evaluate_actions(
                 flat_states, flat_edges, flat_actions
@@ -255,17 +297,6 @@ class FederatedPPOAgent(nn.Module):
             totals["actor"] += actor_loss.item()
             totals["critic"] += critic_loss.item()
             totals["entropy"] += entropy_loss.item()
-
-        self.memory.clear()
-        self.update_count += 1
-
-        n = self.config.n_epochs
-        return {
-            "total_loss": totals["total"] / n,
-            "actor_loss": totals["actor"] / n,
-            "critic_loss": totals["critic"] / n,
-            "entropy_loss": totals["entropy"] / n,
-        }
 
     # ------------------------------------------------------------------ #
     # 聯邦式學習

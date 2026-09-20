@@ -227,3 +227,20 @@ def test_load_env_file_does_not_override_existing(tmp_path, monkeypatch):
 
 def test_load_env_file_missing_is_not_an_error(tmp_path):
     assert load_env_file(tmp_path / "nope.env") is False
+
+
+@pytest.mark.parametrize("section_value", [[1], [], "abc", 3, None])
+def test_from_dict_rejects_non_object_section(section_value):
+    """`{"rl": [1]}` 之類的內容以前會在 .items() 丟出 AttributeError。
+
+    `{"rl": []}` 更糟：因為是 falsey，被 `or {}` 當成「沒給」而安靜忽略。
+    """
+    with pytest.raises(TypeError, match="rl 區塊必須是物件"):
+        SystemConfig.from_dict({"rl": section_value})
+
+
+def test_from_dict_missing_section_uses_defaults():
+    """沒給的區塊還是要用預設值，不能跟著一起被擋下來。"""
+    config = SystemConfig.from_dict({"ui": {"chart_height": 500}})
+    assert config.rl.batch_size == RLConfig().batch_size
+    assert config.ui.chart_height == 500

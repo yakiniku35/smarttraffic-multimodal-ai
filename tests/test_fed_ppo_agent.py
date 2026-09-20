@@ -296,3 +296,63 @@ def test_clone_keeps_source_device(agent):
     if torch.cuda.is_available():  # pragma: no cover - CI 通常沒有 GPU
         gpu_agent = agent.to("cuda")
         assert gpu_agent.clone().device.type == "cuda"
+
+
+def test_update_evaluates_loss_without_dropout(config, edge_index):
+    """PPO 的重要性取樣比值在第 0 輪必須剛好是 1。
+
+    old_logprobs 是在 eval 模式下收集的。如果 update() 用 train 模式
+    重新評估，dropout 每次抽到不同的 mask，即使參數完全沒變比值也不是 1
+    ── 等於一開始就在對雜訊做裁切。
+    """
+    torch.manual_seed(0)
+    config.dropout = 0.3
+    agent = FederatedPPOAgent(config, edge_index)
+
+    agent.eval()
+    for _ in range(NUM_STEPS):
+        state = torch.randn(NUM_NODES, config.state_dim)
+        with torch.no_grad():
+            action, logprob, value = agent.get_action_and_value(state, edge_index)
+        agent.memory.store(state, edge_index, action, logprob, 1.0, False, value)
+
+    states, edges, actions, old_logprobs, *_ = agent.memory.get_batch()
+    flat_states, flat_edges = agent.batch_graphs(states, edges)
+
+    agent.train()  # main.py 在呼叫 update() 之前就是這個狀態
+    agent.eval()   # update() 內部會自己切成 eval
+    with torch.no_grad():
+        new_logprobs, _, _ = agent.evaluate_actions(
+            flat_states, flat_edges, actions.reshape(-1)
+        )
+
+    ratio = torch.exp(new_logprobs - old_logprobs.reshape(-1))
+    assert torch.allclose(ratio, torch.ones_like(ratio), atol=1e-6)
+
+
+def test_update_restores_training_mode(config, edge_index):
+    """update() 借用 eval 模式之後要把原本的模式還回去。"""
+    torch.manual_seed(0)
+    agent = FederatedPPOAgent(config, edge_index)
+
+    agent.eval()
+    for _ in range(NUM_STEPS):
+        state = torch.randn(NUM_NODES, config.state_dim)
+        with torch.no_grad():
+            action, logprob, value = agent.get_action_and_value(state, edge_index)
+        agent.memory.store(state, edge_index, action, logprob, 1.0, False, value)
+
+    for mode in (True, False):
+        agent.train(mode)
+        # 重新填一次緩衝區（update() 會清空）
+        if len(agent.memory) == 0:
+            agent.eval()
+            for _ in range(NUM_STEPS):
+                state = torch.randn(NUM_NODES, config.state_dim)
+                with torch.no_grad():
+                    a, lp, v = agent.get_action_and_value(state, edge_index)
+                agent.memory.store(state, edge_index, a, lp, 1.0, False, v)
+            agent.train(mode)
+
+        agent.update()
+        assert agent.training is mode

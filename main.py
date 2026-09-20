@@ -362,18 +362,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     # 先載入 .env，後面讀 API 金鑰才拿得到（README 有寫這個用法）
     load_env_file()
 
-    # --config 現在真的會被使用
-    config = SystemConfig.load(args.config) if args.config else SystemConfig()
-
-    if args.log_level:
-        config.log_level = args.log_level
-    if args.seed is not None:
-        config.traffic.random_seed = args.seed
-
+    # 讀檔和驗證要放在同一個 try 裡。
+    # 設定檔可能是壞掉的 JSON、最外層不是物件、或某個區塊型別不對，
+    # 這些都會丟出例外；放在 try 之外的話使用者看到的是一長串 traceback，
+    # 而不是說好的「設定檔有誤 + 結束碼 2」。
     try:
+        # --config 現在真的會被使用
+        config = SystemConfig.load(args.config) if args.config else SystemConfig()
+
+        if args.log_level:
+            config.log_level = args.log_level
+        if args.seed is not None:
+            config.traffic.random_seed = args.seed
+
         config.validate()
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
+        # json.JSONDecodeError 是 ValueError 的子類別，所以也涵蓋在內
         print(f"設定檔有誤：{exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"讀取設定檔失敗：{exc}", file=sys.stderr)
         return 2
 
     config.ensure_directories()
