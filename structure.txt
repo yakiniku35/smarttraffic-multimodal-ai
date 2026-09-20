@@ -1,28 +1,41 @@
 smarttraffic-multimodal-ai/
 ├── requirements.txt              # 依賴套件
-├── main.py                      # 主程式入口
-├── config.py                    # 系統配置
-├── multimodal/                  # 多模態數據處理
+├── main.py                       # 主程式入口（train / inference / web）
+├── config.py                     # 系統配置（dataclass + JSON 讀寫 + 驗證）
+├── .streamlit/
+│   └── config.toml               # Streamlit 主題與伺服器設定
+├── multimodal/                   # 多模態數據處理
 │   ├── __init__.py
-│   ├── data_fusion.py          # 多模態數據融合
-│   ├── text_processor.py       # 文本數據處理
-│   ├── image_processor.py      # 影像數據處理
-│   └── sensor_processor.py     # 感測器數據處理
-├── reinforcement_learning/      # 強化學習模組
+│   └── data_fusion.py            # 多模態數據融合（文字 + 影像 + 感測器）
+├── reinforcement_learning/       # 強化學習模組
 │   ├── __init__.py
-│   ├── fed_ppo_agent.py        # 聯邦PPO智能體
-│   ├── marl_environment.py     # 多智能體環境
-│   └── graph_network.py        # 圖神經網路
-├── traffic_simulation/          # 交通模擬
+│   └── fed_ppo_agent.py          # 聯邦PPO智能體（含GNN與FedAvg）
+├── traffic_simulation/           # 交通模擬
 │   ├── __init__.py
-│   ├── sumo_interface.py       # SUMO模擬器介面
-│   └── traffic_generator.py    # 交通流量生成
-├── web_interface/              # 網頁介面
-│   ├── app.py                  # Streamlit應用
-│   └── components/             # UI組件
-├── deployment/                 # 部署配置
-│   ├── Dockerfile
-│   └── kubernetes/
-└── experiments/                # 實驗與評估
-    ├── training.py
-    └── evaluation.py
+│   └── sumo_interface.py         # SUMO介面 + 內建模擬環境（無SUMO也能跑）
+├── web_interface/                # 網頁介面
+│   ├── __init__.py
+│   ├── app.py                    # Streamlit應用（版面）
+│   ├── theme.py                  # 配色與CSS（支援淺色/深色）
+│   ├── data_source.py            # 示範資料（固定種子，不會亂跳）
+│   └── components/               # UI組件
+│       ├── __init__.py
+│       ├── metrics.py            # 指標列與狀態卡片
+│       └── settings_panel.py     # 系統設定分頁
+├── tests/                        # 單元測試（pytest）
+│   ├── test_config.py
+│   ├── test_data_fusion.py
+│   ├── test_data_source.py
+│   ├── test_fed_ppo_agent.py
+│   └── test_traffic_environment.py
+├── configs/                      # 設定檔（執行時產生，已 git-ignore）
+├── models/                       # 模型檔（執行時產生，已 git-ignore）
+├── data/                         # 資料集（執行時產生，已 git-ignore）
+└── logs/                         # 日誌（執行時產生，已 git-ignore）
+
+尚未實作（未來規劃）：
+├── multimodal/text_processor.py, image_processor.py, sensor_processor.py
+├── reinforcement_learning/marl_environment.py, graph_network.py
+├── traffic_simulation/traffic_generator.py
+├── deployment/                   # Dockerfile、kubernetes/
+└── experiments/                  # training.py、evaluation.py

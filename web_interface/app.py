@@ -1,499 +1,620 @@
-import streamlit as st
+"""多模態 AI 智慧城市交通優化系統 ── Streamlit 網頁介面。
+
+執行方式::
+
+    streamlit run web_interface/app.py
+    # 或
+    python main.py --mode web
+
+這個檔案只負責「版面」，資料來源在 ``data_source.py``、
+樣式在 ``theme.py``、可重複使用的元件在 ``components/``。
+拆開之後每個檔案都短很多，也比較好找東西。
+"""
+
+from __future__ import annotations
+
+import sys
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-import pandas as pd
-import numpy as np
-import torch
-from datetime import datetime, timedelta
-import time
+import streamlit as st
 
-# 設定頁面配置
+# 讓 `streamlit run web_interface/app.py` 也能 import 到專案根目錄的模組
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from config import load_env_file  # noqa: E402
+from web_interface import data_source as ds  # noqa: E402
+from web_interface.components.metrics import (  # noqa: E402
+    metric_row,
+    signal_card,
+    source_badges,
+)
+from web_interface.components.settings_panel import (  # noqa: E402
+    PRESERVED_KEYS,
+    get_config,
+    render_settings_tab,
+)
+from web_interface.theme import (  # noqa: E402
+    CHART_COLORS,
+    hero,
+    inject_css,
+    plotly_template,
+    resolve_theme,
+)
+
+# `streamlit run` 不會經過 main.py，所以這裡要自己載入 .env，
+# 否則設定頁的金鑰狀態永遠顯示「未設定」
+load_env_file()
+
 st.set_page_config(
     page_title="多模態AI智慧城市交通優化系統",
     page_icon="🚦",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# 自定義CSS
-st.markdown("""
-<style>
-.main-header {
-    font-size: 3rem;
-    color: #1f77b4;
-    text-align: center;
-    margin-bottom: 2rem;
-    background: linear-gradient(90deg, #1f77b4, #ff7f0e);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-}
-.metric-card {
-    background-color: #f8f9fa;
-    padding: 1.5rem;
-    border-radius: 10px;
-    border-left: 5px solid #1f77b4;
-    margin: 1rem 0;
-}
-.status-good { color: #28a745; }
-.status-warning { color: #ffc107; }
-.status-danger { color: #dc3545; }
-</style>
-""", unsafe_allow_html=True)
 
-@st.cache_data
-def load_sample_data():
-    """載入示例數據"""
-    np.random.seed(42)
-    
-    # 交通流量數據
-    timestamps = pd.date_range(start='2025-06-10 00:00', periods=24, freq='H')
-    traffic_data = pd.DataFrame({
-        'timestamp': timestamps,
-        'intersection_1': np.random.normal(150, 30, 24),
-        'intersection_2': np.random.normal(180, 40, 24),
-        'intersection_3': np.random.normal(120, 25, 24),
-        'intersection_4': np.random.normal(200, 50, 24)
-    })
-    
-    return traffic_data
+# --------------------------------------------------------------------------- #
+# 工作階段狀態
+# --------------------------------------------------------------------------- #
+def init_session_state() -> None:
+    """初始化所有會跨 rerun 保存的狀態。
 
-def main():
-    # 主標題
-    st.markdown('<h1 class="main-header">🚦 多模態AI智慧城市交通優化系統</h1>', unsafe_allow_html=True)
-    
-    # 側邊欄控制面板
+    這是舊版最缺的東西：以前按下「啟動 AI 優化」只會閃一個綠色訊息，
+    下一次重新執行就忘得一乾二淨。現在狀態真的會被記住。
+    """
+    defaults = {
+        "tick": 0,  # 資料刻度，+1 代表抓到一批新資料
+        # 這一批資料實際載入的時間。存在 session_state 裡而不是每次
+        # 現算，否則「最後更新」會在沒有新資料時也一直往前跳。
+        "tick_loaded_at": datetime.now(),
+        "optimizer_running": False,
+        "started_at": datetime.now(),
+        "event_log": [],
+        "data_sources": {key: key != "social" for key in ds.DATA_SOURCE_LABELS},
+        "operation_mode": "自動模式",
+        "control_strategy": "AI自適應控制",
+        "optimization_goal": "最小化等待時間",
+    }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
+
+
+def log_event(message: str, level: str = "info") -> None:
+    """把操作記錄下來，顯示在側邊欄，讓使用者知道剛剛發生了什麼事。"""
+    st.session_state.event_log.insert(
+        0, {"time": datetime.now().strftime("%H:%M:%S"), "message": message, "level": level}
+    )
+    del st.session_state.event_log[12:]  # 只留最近 12 筆
+
+
+def refresh_data() -> None:
+    """抓下一批資料（把刻度 +1，所有圖表就會跟著更新）。"""
+    st.session_state.tick += 1
+    st.session_state.tick_loaded_at = datetime.now()
+
+
+def _auto_refresh_ticker(interval_s: int) -> None:
+    """定時自動載入下一批資料。
+
+    重點是**不要用 ``time.sleep()``**。在腳本主體裡 sleep 會把這個
+    工作階段的執行緒一直佔住：使用者在等待期間點任何東西都不會有反應，
+    多人同時使用時更是每個人各佔一條執行緒。
+
+    改用 ``st.fragment(run_every=...)``：Streamlit 會自己安排計時，
+    時間到才執行這個小片段，不阻塞腳本。片段裡再用
+    ``st.rerun(scope="app")`` 讓整頁跟著更新。
+
+    ``run_every`` 只能在套用裝飾器時指定，而間隔是使用者可調的，
+    所以在這裡動態套用（fragment 以函式的 qualname 辨識，每次 rerun
+    重新套用仍然是同一個片段）。
+
+    那個時間判斷不能省。片段的內容在「每一次正常的整頁執行」也會跑，
+    不是只有計時器到點才跑；少了判斷就會變成
+    整頁執行 → 片段 → rerun → 整頁執行 → …的全速迴圈
+    （實測 3 秒的間隔會變成每秒更新約 3 次）。
+    改成只有真的經過設定的秒數才更新，正常那一趟就直接跳過。
+    """
+
+    def _tick() -> None:
+        elapsed = (datetime.now() - st.session_state.tick_loaded_at).total_seconds()
+        if elapsed < interval_s:
+            return
+        refresh_data()
+        st.rerun(scope="app")
+
+    st.fragment(run_every=interval_s)(_tick)()
+
+
+# --------------------------------------------------------------------------- #
+# 側邊欄
+# --------------------------------------------------------------------------- #
+def render_sidebar(config) -> None:
     with st.sidebar:
-        st.header("🎛️ 系統控制面板")
-        
-        # 系統狀態
-        st.subheader("系統狀態")
-        system_status = st.selectbox("選擇系統模式", ["自動模式", "手動模式", "維護模式"])
-        
-        if system_status == "自動模式":
-            st.success("✅ AI系統正在自動優化交通流量")
-        elif system_status == "手動模式":
-            st.warning("⚠️ 手動控制模式已啟用")
-        else:
-            st.error("🔧 系統維護中")
-        
-        # 多模態數據源
-        st.subheader("多模態數據源")
-        data_sources = {
-            "交通攝影機": st.checkbox("交通攝影機", value=True),
-            "GPS軌跡": st.checkbox("GPS軌跡數據", value=True),
-            "氣象資訊": st.checkbox("氣象資訊", value=True),
-            "社群媒體": st.checkbox("社群媒體文本", value=False),
-            "感測器": st.checkbox("IoT感測器", value=True)
-        }
-        
-        # 強化學習參數
-        st.subheader("強化學習參數")
-        learning_rate = st.slider("學習率", 0.0001, 0.01, 0.0003, format="%.4f")
-        epsilon = st.slider("探索率", 0.01, 1.0, 0.1, format="%.2f")
-        
-        # 即時控制
+        st.header("🎛️ 控制面板")
+
+        # ---------------- 運作模式 ---------------- #
+        st.session_state.operation_mode = st.radio(
+            "運作模式",
+            ["自動模式", "手動模式", "維護模式"],
+            index=["自動模式", "手動模式", "維護模式"].index(
+                st.session_state.operation_mode
+            ),
+            horizontal=True,
+        )
+
+        mode_hint = {
+            "自動模式": ("AI 正在自動優化交通流量", st.success),
+            "手動模式": ("手動控制已啟用，AI 只提供建議", st.warning),
+            "維護模式": ("系統維護中，號誌維持固定時制", st.error),
+        }[st.session_state.operation_mode]
+        mode_hint[1](mode_hint[0])
+
+        st.divider()
+
+        # ---------------- 即時控制 ---------------- #
         st.subheader("即時控制")
-        if st.button("🚀 啟動AI優化", type="primary"):
-            st.success("AI優化已啟動！")
-        
-        if st.button("⏹️ 停止優化"):
-            st.info("AI優化已停止")
-        
-        if st.button("🔄 重置系統"):
-            st.warning("系統正在重置...")
-    
-    # 主要顯示區域
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📊 即時監控", "🤖 AI模型狀態", "🚦 交通控制", "📈 效能分析", "⚙️ 系統設定"
-    ])
-    
-    with tab1:
-        st.header("📊 即時交通監控")
-        
-        # 載入數據
-        traffic_data = load_sample_data()
-        
-        # 關鍵指標
-        col1, col2, col3, col4 = st.columns(4)
-        
+        running = st.session_state.optimizer_running
+        st.metric("優化引擎", "運行中" if running else "已停止")
+
+        col1, col2 = st.columns(2)
         with col1:
-            current_traffic = np.random.randint(150, 300)
-            st.metric(
-                "當前車流量", 
-                f"{current_traffic} 輛/小時",
-                delta=f"{np.random.randint(-20, 20)} 輛/小時"
-            )
-        
+            if st.button(
+                "🚀 啟動", width="stretch", disabled=running, type="primary"
+            ):
+                st.session_state.optimizer_running = True
+                log_event("AI 優化已啟動", "success")
+                st.rerun()
         with col2:
-            avg_speed = np.random.uniform(25, 45)
-            st.metric(
+            if st.button("⏹️ 停止", width="stretch", disabled=not running):
+                st.session_state.optimizer_running = False
+                log_event("AI 優化已停止", "warning")
+                st.rerun()
+
+        if st.button("🔄 更新資料", width="stretch"):
+            refresh_data()
+            log_event("已載入最新一批資料")
+            st.rerun()
+
+        if st.button("♻️ 重置系統", width="stretch"):
+            # 重置時把狀態清掉，但保留使用者調好的設定。
+            # 存檔快照也要一起保留，否則「系統設定」會一直誤報尚未寫入檔案。
+            preserved = {
+                key: st.session_state[key]
+                for key in PRESERVED_KEYS
+                if key in st.session_state
+            }
+            st.session_state.clear()
+            st.session_state.update(preserved)
+            init_session_state()
+            log_event("系統已重置", "warning")
+            st.rerun()
+
+        st.divider()
+
+        # ---------------- 資料源 ---------------- #
+        st.subheader("多模態資料源")
+        st.caption("取消勾選的資料源，融合權重會自動重新分配。")
+        for key, label in ds.DATA_SOURCE_LABELS.items():
+            st.session_state.data_sources[key] = st.checkbox(
+                label, value=st.session_state.data_sources[key], key=f"src_{key}"
+            )
+
+        if not any(st.session_state.data_sources.values()):
+            st.error("至少要啟用一個資料源，否則模型沒有輸入。")
+
+        st.divider()
+
+        # ---------------- 操作記錄 ---------------- #
+        st.subheader("操作記錄")
+        if st.session_state.event_log:
+            for entry in st.session_state.event_log:
+                st.caption(f"`{entry['time']}` {entry['message']}")
+        else:
+            st.caption("目前沒有記錄。")
+
+        st.divider()
+        st.caption(f"資料刻度 #{st.session_state.tick} · 主題：{config.ui.theme}")
+
+
+# --------------------------------------------------------------------------- #
+# 分頁一：即時監控
+# --------------------------------------------------------------------------- #
+def render_monitoring_tab(config, template: str) -> None:
+    st.subheader("📊 即時交通監控")
+
+    tick = st.session_state.tick
+    seed = config.traffic.random_seed or 0
+    dp = config.ui.decimal_places
+
+    snapshot = ds.build_live_snapshot(tick, seed, st.session_state.tick_loaded_at)
+
+    # 第一次載入時還沒有「上一批資料」可以比，就不要顯示 +0.0 的假變化量
+    def delta(text: str) -> str | None:
+        return text if tick > 0 else None
+
+    metric_row(
+        [
+            (
+                "當前車流量",
+                f"{snapshot.traffic_volume} 輛/小時",
+                delta(f"{snapshot.traffic_delta:+d} 輛/小時"),
+            ),
+            (
                 "平均車速",
-                f"{avg_speed:.1f} km/h",
-                delta=f"{np.random.uniform(-5, 5):.1f} km/h"
-            )
-        
-        with col3:
-            wait_time = np.random.uniform(20, 60)
-            st.metric(
+                f"{snapshot.average_speed:.{dp}f} km/h",
+                delta(f"{snapshot.speed_delta:+.{dp}f} km/h"),
+            ),
+            (
                 "平均等待時間",
-                f"{wait_time:.1f} 秒",
-                delta=f"{np.random.uniform(-10, 10):.1f} 秒"
-            )
-        
-        with col4:
-            efficiency = np.random.uniform(75, 95)
-            st.metric(
+                f"{snapshot.waiting_time:.{dp}f} 秒",
+                delta(f"{snapshot.waiting_delta:+.{dp}f} 秒"),
+                # 等待時間越小越好，所以要反過來：變多顯示紅色
+                "inverse",
+            ),
+            (
                 "系統效率",
-                f"{efficiency:.1f}%",
-                delta=f"{np.random.uniform(-5, 5):.1f}%"
+                f"{snapshot.efficiency:.{dp}f}%",
+                delta(f"{snapshot.efficiency_delta:+.{dp}f}%"),
+            ),
+        ]
+    )
+
+    st.caption(
+        f"最後更新：{snapshot.timestamp:%Y-%m-%d %H:%M:%S}"
+        + ("" if tick else "（按左側「更新資料」可載入下一批）")
+    )
+
+    st.markdown("#### 24 小時車流量趨勢")
+    history = ds.build_traffic_history(seed)
+
+    fig = go.Figure()
+    for i, tl_id in enumerate(ds.INTERSECTION_IDS):
+        fig.add_trace(
+            go.Scatter(
+                x=history["timestamp"],
+                y=history[tl_id],
+                mode="lines",
+                name=f"路口 {tl_id}",
+                line=dict(width=2.5, color=CHART_COLORS[i % len(CHART_COLORS)]),
             )
-        
-        # 交通流量趨勢圖
-        st.subheader("📈 24小時交通流量趨勢")
-        
-        fig_traffic = go.Figure()
-        
-        for intersection in ['intersection_1', 'intersection_2', 'intersection_3', 'intersection_4']:
-            fig_traffic.add_trace(go.Scatter(
-                x=traffic_data['timestamp'],
-                y=traffic_data[intersection],
-                mode='lines+markers',
-                name=f'路口 {intersection.split("_")[1]}',
-                line=dict(width=3)
-            ))
-        
-        fig_traffic.update_layout(
-            title="各路口車流量變化",
-            xaxis_title="時間",
-            yaxis_title="車流量 (輛/小時)",
-            hovermode='x unified',
-            height=400
         )
-        
-        st.plotly_chart(fig_traffic, use_container_width=True)
-        
-        # 交通熱力圖
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("🗺️ 交通密度熱力圖")
-            
-            # 生成模擬熱力圖數據
-            grid_size = 10
-            density_data = np.random.exponential(2, (grid_size, grid_size))
-            
-            fig_heatmap = px.imshow(
-                density_data,
-                color_continuous_scale='Reds',
-                title="實時交通密度分佈"
-            )
-            fig_heatmap.update_layout(height=400)
-            st.plotly_chart(fig_heatmap, use_container_width=True)
-        
-        with col2:
-            st.subheader("🚦 交通燈狀態")
-            
-            # 交通燈狀態表格
-            light_status = pd.DataFrame({
-                '路口ID': ['TL_001', 'TL_002', 'TL_003', 'TL_004'],
-                '當前相位': ['綠燈', '紅燈', '綠燈', '黃燈'],
-                '剩餘時間': ['25秒', '45秒', '15秒', '3秒'],
-                '等待車輛': [12, 28, 8, 15],
-                'AI建議': ['延長', '正常', '縮短', '切換']
-            })
-            
-            # 美化表格顯示
-            for idx, row in light_status.iterrows():
-                status_color = {
-                    '綠燈': 'status-good',
-                    '黃燈': 'status-warning', 
-                    '紅燈': 'status-danger'
-                }[row['當前相位']]
-                
-                st.markdown(f"""
-                <div class="metric-card">
-                    <strong>{row['路口ID']}</strong><br>
-                    <span class="{status_color}">● {row['當前相位']}</span> - {row['剩餘時間']}<br>
-                    等待車輛: {row['等待車輛']} 輛<br>
-                    AI建議: <strong>{row['AI建議']}</strong>
-                </div>
-                """, unsafe_allow_html=True)
-    
-    with tab2:
-        st.header("🤖 AI模型運行狀態")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("📊 模型效能指標")
-            
-            # 模型效能數據
-            model_metrics = {
-                '預測准確率': 94.2,
-                '收斂速度': 87.5,
-                '決策效率': 91.8,
-                '學習穩定性': 89.3
-            }
-            
-            for metric, value in model_metrics.items():
-                progress_color = 'normal'
-                if value >= 90:
-                    progress_color = 'success'
-                elif value >= 80:
-                    progress_color = 'warning'
-                else:
-                    progress_color = 'error'
-                
-                st.metric(metric, f"{value}%")
-                st.progress(value / 100)
-        
-        with col2:
-            st.subheader("🔬 多模態融合狀態")
-            
-            fusion_data = pd.DataFrame({
-                '數據源': ['交通攝影機', 'GPS軌跡', '氣象資訊', '社群媒體', 'IoT感測器'],
-                '數據量 (MB/h)': [1200, 800, 50, 300, 150],
-                '處理延遲 (ms)': [45, 23, 12, 67, 18],
-                '融合權重': [0.35, 0.25, 0.15, 0.10, 0.15]
-            })
-            
-            # 融合權重餅圖
-            fig_pie = px.pie(
-                fusion_data, 
-                values='融合權重', 
-                names='數據源',
-                title="多模態數據融合權重分配"
-            )
-            st.plotly_chart(fig_pie, use_container_width=True)
-        
-        # 訓練損失曲線
-        st.subheader("📉 模型訓練進度")
-        
-        # 生成模擬訓練數據
-        epochs = list(range(1, 101))
-        actor_loss = [1.0 * np.exp(-x/20) + 0.1 + np.random.normal(0, 0.05) for x in epochs]
-        critic_loss = [0.8 * np.exp(-x/25) + 0.08 + np.random.normal(0, 0.03) for x in epochs]
-        
-        fig_training = go.Figure()
-        fig_training.add_trace(go.Scatter(x=epochs, y=actor_loss, name='Actor Loss', line=dict(color='blue')))
-        fig_training.add_trace(go.Scatter(x=epochs, y=critic_loss, name='Critic Loss', line=dict(color='red')))
-        
-        fig_training.update_layout(
-            title="強化學習訓練損失",
-            xaxis_title="訓練輪數",
-            yaxis_title="損失值",
-            height=400
+    fig.update_layout(
+        template=template,
+        xaxis_title="時間",
+        yaxis_title="車流量 (輛/小時)",
+        hovermode="x unified",
+        height=config.ui.chart_height,
+        margin=dict(l=10, r=10, t=30, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0),
+    )
+    st.plotly_chart(fig, width="stretch")
+
+    col1, col2 = st.columns([3, 2])
+
+    with col1:
+        st.markdown("#### 交通密度熱力圖")
+        density = ds.build_density_grid(tick, seed)
+        fig_heatmap = px.imshow(
+            density,
+            color_continuous_scale="Reds",
+            labels={"x": "東西向區塊", "y": "南北向區塊", "color": "密度"},
+            aspect="auto",
         )
-        
-        st.plotly_chart(fig_training, use_container_width=True)
-    
-    with tab3:
-        st.header("🚦 智能交通信號控制")
-        
-        # 交通控制面板
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.subheader("🎯 控制策略")
-            control_strategy = st.selectbox(
-                "選擇控制策略",
-                ["AI自適應控制", "定時控制", "感應控制", "手動控制"]
-            )
-            
-            optimization_goal = st.selectbox(
-                "優化目標",
-                ["最小化等待時間", "最大化通過量", "均衡化流量", "減少排放"]
-            )
-        
-        with col2:
-            st.subheader("⚡ 即時調整")
-            
-            # 緊急控制按鈕
-            if st.button("🚨 緊急車輛優先", type="primary"):
-                st.success("緊急車輛綠色通道已啟動！")
-            
-            if st.button("🔧 重新路徑規劃"):
-                st.info("正在重新計算最優路徑...")
-            
-            if st.button("📊 流量重分配"):
-                st.warning("正在執行流量重新分配...")
-        
-        with col3:
-            st.subheader("📱 手動控制")
-            
-            selected_intersection = st.selectbox(
-                "選擇路口",
-                ["路口 TL_001", "路口 TL_002", "路口 TL_003", "路口 TL_004"]
-            )
-            
-            manual_phase = st.selectbox(
-                "設置信號相位",
-                ["南北直行", "東西直行", "左轉", "全紅"]
-            )
-            
-            if st.button("✅ 執行手動控制"):
-                st.success(f"{selected_intersection} 已設置為 {manual_phase}")
-        
-        # 控制效果預測
-        st.subheader("🔮 控制效果預測")
-        
-        # 生成預測數據
-        time_horizon = list(range(1, 31))  # 30分鐘預測
-        current_scenario = [100 + 10*np.sin(t/5) + np.random.normal(0, 5) for t in time_horizon]
-        optimized_scenario = [80 + 8*np.sin(t/5) + np.random.normal(0, 3) for t in time_horizon]
-        
-        fig_prediction = go.Figure()
-        fig_prediction.add_trace(go.Scatter(
-            x=time_horizon, 
-            y=current_scenario, 
-            name='當前策略', 
-            line=dict(color='red', dash='dash')
-        ))
-        fig_prediction.add_trace(go.Scatter(
-            x=time_horizon, 
-            y=optimized_scenario, 
-            name='AI優化策略', 
-            line=dict(color='green')
-        ))
-        
-        fig_prediction.update_layout(
-            title="未來30分鐘等待時間預測對比",
-            xaxis_title="時間 (分鐘)",
-            yaxis_title="平均等待時間 (秒)",
-            height=400
+        fig_heatmap.update_layout(
+            template=template,
+            height=config.ui.chart_height,
+            margin=dict(l=10, r=10, t=10, b=10),
         )
-        
-        st.plotly_chart(fig_prediction, use_container_width=True)
-    
-    with tab4:
-        st.header("📈 系統效能分析")
-        
-        # 效能提升統計
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.subheader("⏱️ 時間效益")
-            time_improvements = {
-                "平均等待時間減少": "27.34%",
-                "通勤時間縮短": "18.7%", 
-                "紅燈等待減少": "31.2%"
-            }
-            
-            for metric, improvement in time_improvements.items():
-                st.metric(metric, improvement, delta=f"+{improvement}")
-        
-        with col2:
-            st.subheader("🌱 環境效益")
-            env_improvements = {
-                "CO2排放減少": "15.8%",
-                "燃油消耗降低": "12.4%",
-                "空氣品質改善": "8.9%"
-            }
-            
-            for metric, improvement in env_improvements.items():
-                st.metric(metric, improvement, delta=f"+{improvement}")
-        
-        with col3:
-            st.subheader("💰 經濟效益")
-            economic_improvements = {
-                "運輸成本節省": "¥2.1M/年",
-                "燃料費用降低": "¥1.3M/年",
-                "維護成本減少": "¥0.8M/年"
-            }
-            
-            for metric, improvement in economic_improvements.items():
-                st.metric(metric, improvement, delta=f"+{improvement}")
-        
-        # 長期趨勢分析
-        st.subheader("📊 長期效能趨勢")
-        
-        # 生成30天的效能數據
-        dates = pd.date_range(start='2025-05-10', periods=30, freq='D')
-        efficiency_trend = 70 + 20 * (1 - np.exp(-np.arange(30)/10)) + np.random.normal(0, 2, 30)
-        
-        fig_trend = px.line(
-            x=dates, 
-            y=efficiency_trend,
-            title="系統效率提升趨勢 (30天)",
-            labels={'x': '日期', 'y': '系統效率 (%)'}
-        )
-        fig_trend.update_traces(line=dict(width=3, color='#1f77b4'))
-        fig_trend.update_layout(height=400)
-        
-        st.plotly_chart(fig_trend, use_container_width=True)
-    
-    with tab5:
-        st.header("⚙️ 系統設定與配置")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("🔧 AI模型參數")
-            
-            with st.expander("強化學習設定"):
-                new_lr = st.number_input("學習率", value=0.0003, format="%.4f")
-                new_gamma = st.slider("折扣因子", 0.8, 0.99, 0.95)
-                new_epsilon = st.slider("探索率衰減", 0.01, 1.0, 0.1)
-                
-                if st.button("💾 保存RL設定"):
-                    st.success("強化學習參數已更新！")
-            
-            with st.expander("多模態融合設定"):
-                text_weight = st.slider("文本權重", 0.0, 1.0, 0.3)
-                image_weight = st.slider("影像權重", 0.0, 1.0, 0.4)
-                sensor_weight = st.slider("感測器權重", 0.0, 1.0, 0.3)
-                
-                if st.button("💾 保存融合設定"):
-                    st.success("多模態融合參數已更新！")
-        
-        with col2:
-            st.subheader("📡 數據源配置")
-            
-            with st.expander("API設定"):
-                openai_key = st.text_input("OpenAI API Key", type="password")
-                weather_api = st.text_input("氣象API Key", type="password")
-                maps_api = st.text_input("地圖API Key", type="password")
-                
-                if st.button("🔗 測試API連接"):
-                    st.info("正在測試API連接...")
-                    time.sleep(2)
-                    st.success("所有API連接正常！")
-            
-            with st.expander("系統監控"):
-                enable_logging = st.checkbox("啟用詳細日誌", value=True)
-                log_level = st.selectbox("日誌級別", ["DEBUG", "INFO", "WARNING", "ERROR"])
-                enable_alerts = st.checkbox("啟用異常告警", value=True)
-                
-                if st.button("📋 下載系統日誌"):
-                    st.success("系統日誌下載已開始！")
-        
-        # 系統資訊
-        st.subheader("💻 系統資訊")
-        
-        system_info = {
-            "系統版本": "SmartTraffic AI v2.1.0",
-            "部署環境": "Kubernetes Cluster",
-            "運行時間": "72天 14小時 32分鐘",
-            "CPU使用率": "45.2%",
-            "記憶體使用": "6.8GB / 16GB",
-            "GPU使用率": "78.3%",
-            "網路延遲": "< 5ms",
-            "數據處理量": "2.3TB/天"
+        st.plotly_chart(fig_heatmap, width="stretch")
+
+    with col2:
+        st.markdown("#### 號誌即時狀態")
+        signals = ds.build_signal_status(tick, seed)
+        for _, row in signals.iterrows():
+            signal_card(row.to_dict())
+
+        if config.ui.show_advanced:
+            st.dataframe(signals, width="stretch", hide_index=True)
+
+
+# --------------------------------------------------------------------------- #
+# 分頁二：AI 模型狀態
+# --------------------------------------------------------------------------- #
+def render_model_tab(config, template: str) -> None:
+    st.subheader("🤖 AI 模型運行狀態")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("#### 模型效能指標")
+        metrics = {
+            "預測準確率": 94.2,
+            "收斂速度": 87.5,
+            "決策效率": 91.8,
+            "學習穩定性": 89.3,
         }
-        
-        col1, col2, col3, col4 = st.columns(4)
-        items = list(system_info.items())
-        
-        for i, (key, value) in enumerate(items):
-            col_idx = i % 4
-            if col_idx == 0:
-                col1.metric(key, value)
-            elif col_idx == 1:
-                col2.metric(key, value)
-            elif col_idx == 2:
-                col3.metric(key, value)
-            else:
-                col4.metric(key, value)
+        for name, value in metrics.items():
+            st.metric(name, f"{value}%")
+            st.progress(value / 100)
+
+    with col2:
+        st.markdown("#### 多模態融合權重")
+        fusion = ds.build_fusion_table(st.session_state.data_sources)
+        active = fusion[fusion["啟用"]]
+
+        if active.empty:
+            st.info("目前沒有啟用任何資料源，請在左側勾選。")
+        else:
+            fig_pie = px.pie(
+                active,
+                values="融合權重",
+                names="資料源",
+                hole=0.45,
+                color_discrete_sequence=CHART_COLORS,
+            )
+            fig_pie.update_layout(
+                template=template,
+                height=config.ui.chart_height,
+                margin=dict(l=10, r=10, t=10, b=10),
+            )
+            fig_pie.update_traces(textposition="inside", textinfo="percent+label")
+            st.plotly_chart(fig_pie, width="stretch")
+
+    source_badges(ds.DATA_SOURCE_LABELS, st.session_state.data_sources)
+
+    if config.ui.show_advanced:
+        st.dataframe(fusion, width="stretch", hide_index=True)
+
+    st.markdown("#### 訓練損失曲線")
+    curves = ds.build_training_curves(seed=config.traffic.random_seed or 0)
+
+    fig_training = go.Figure()
+    for i, column in enumerate(["Actor Loss", "Critic Loss"]):
+        fig_training.add_trace(
+            go.Scatter(
+                x=curves["epoch"],
+                y=curves[column],
+                name=column,
+                line=dict(color=CHART_COLORS[i], width=2.5),
+            )
+        )
+    fig_training.update_layout(
+        template=template,
+        xaxis_title="訓練輪數",
+        yaxis_title="損失值",
+        height=config.ui.chart_height,
+        hovermode="x unified",
+        margin=dict(l=10, r=10, t=30, b=10),
+    )
+    st.plotly_chart(fig_training, width="stretch")
+
+
+# --------------------------------------------------------------------------- #
+# 分頁三：交通控制
+# --------------------------------------------------------------------------- #
+def render_control_tab(config, template: str) -> None:
+    st.subheader("🚦 智慧號誌控制")
+
+    manual_allowed = st.session_state.operation_mode == "手動模式"
+    if not manual_allowed:
+        st.info("手動控制只有在「手動模式」下才能使用，請先到左側切換模式。")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.markdown("#### 控制策略")
+        strategies = ["AI自適應控制", "定時控制", "感應控制", "手動控制"]
+        st.session_state.control_strategy = st.selectbox(
+            "選擇控制策略",
+            strategies,
+            index=strategies.index(st.session_state.control_strategy),
+        )
+
+        goals = ["最小化等待時間", "最大化通過量", "均衡化流量", "減少排放"]
+        st.session_state.optimization_goal = st.selectbox(
+            "優化目標", goals, index=goals.index(st.session_state.optimization_goal)
+        )
+
+    with col2:
+        st.markdown("#### 即時調整")
+        if st.button("🚨 緊急車輛優先", type="primary", width="stretch"):
+            log_event("已開啟緊急車輛綠色通道", "success")
+            refresh_data()
+            st.rerun()
+        if st.button("🔧 重新路徑規劃", width="stretch"):
+            log_event("已重新計算最佳路徑")
+            refresh_data()
+            st.rerun()
+        if st.button("📊 流量重分配", width="stretch"):
+            log_event("已執行流量重新分配", "warning")
+            refresh_data()
+            st.rerun()
+
+    with col3:
+        st.markdown("#### 手動控制")
+        intersection = st.selectbox(
+            "選擇路口", ds.INTERSECTION_IDS, disabled=not manual_allowed
+        )
+        phase = st.selectbox(
+            "設定號誌相位",
+            ["南北直行", "東西直行", "左轉", "全紅"],
+            disabled=not manual_allowed,
+        )
+        if st.button(
+            "✅ 執行手動控制",
+            disabled=not manual_allowed,
+            width="stretch",
+        ):
+            log_event(f"{intersection} 已設為「{phase}」", "success")
+            refresh_data()
+            st.rerun()
+
+    st.markdown("#### 未來 30 分鐘等待時間預測")
+    prediction = ds.build_prediction(st.session_state.tick, config.traffic.random_seed or 0)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=prediction["分鐘"],
+            y=prediction["現行策略"],
+            name="現行策略",
+            line=dict(color=CHART_COLORS[4], width=2.5, dash="dash"),
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=prediction["分鐘"],
+            y=prediction["AI 優化策略"],
+            name="AI 優化策略",
+            line=dict(color=CHART_COLORS[2], width=3),
+            fill="tonexty",
+            fillcolor="rgba(47, 158, 99, 0.12)",
+        )
+    )
+    fig.update_layout(
+        template=template,
+        xaxis_title="時間 (分鐘)",
+        yaxis_title="平均等待時間 (秒)",
+        height=config.ui.chart_height,
+        hovermode="x unified",
+        margin=dict(l=10, r=10, t=30, b=10),
+    )
+    st.plotly_chart(fig, width="stretch")
+
+    saving = prediction["現行策略"].mean() - prediction["AI 優化策略"].mean()
+    st.success(
+        f"預估平均每車可少等 {saving:.1f} 秒"
+        f"（{saving / prediction['現行策略'].mean() * 100:.1f}%）"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 分頁四：效能分析
+# --------------------------------------------------------------------------- #
+def render_analytics_tab(config, template: str) -> None:
+    st.subheader("📈 系統效能分析")
+
+    col1, col2, col3 = st.columns(3)
+
+    # 舊版把 delta 寫成 f"+{改善幅度}"，等於把同一個數字顯示兩次
+    # （「27.34%」下面再掛一個「+27.34%」）。改成數值 + 與上月相比的變化。
+    with col1:
+        st.markdown("#### ⏱️ 時間效益")
+        metric_row(
+            [
+                ("平均等待時間減少", "27.3%", "+2.1%"),
+                ("通勤時間縮短", "18.7%", "+1.4%"),
+                ("紅燈等待減少", "31.2%", "+3.0%"),
+            ],
+            columns=1,
+        )
+
+    with col2:
+        st.markdown("#### 🌱 環境效益")
+        metric_row(
+            [
+                ("CO₂ 排放減少", "15.8%", "+0.9%"),
+                ("燃油消耗降低", "12.4%", "+0.6%"),
+                ("空氣品質改善", "8.9%", "+0.4%"),
+            ],
+            columns=1,
+        )
+
+    with col3:
+        st.markdown("#### 💰 經濟效益")
+        metric_row(
+            [
+                ("運輸成本節省", "NT$2.1 億/年", "+8.0%"),
+                ("燃料費用降低", "NT$1.3 億/年", "+5.2%"),
+                ("維護成本減少", "NT$0.8 億/年", "+3.1%"),
+            ],
+            columns=1,
+        )
+
+    st.caption("※ 以上為與導入前基準期相比的模擬結果，變化量為與上月相比。")
+
+    st.markdown("#### 30 天系統效率趨勢")
+    trend = ds.build_efficiency_trend(seed=config.traffic.random_seed or 0)
+
+    fig = px.line(trend, x="日期", y="系統效率", markers=False)
+    fig.update_traces(line=dict(width=3, color=CHART_COLORS[0]))
+    fig.add_hline(
+        y=float(trend["系統效率"].mean()),
+        line_dash="dot",
+        line_color=CHART_COLORS[1],
+        annotation_text=f"期間平均 {trend['系統效率'].mean():.1f}%",
+    )
+    fig.update_layout(
+        template=template,
+        height=config.ui.chart_height,
+        yaxis_title="系統效率 (%)",
+        margin=dict(l=10, r=10, t=30, b=10),
+    )
+    st.plotly_chart(fig, width="stretch")
+
+    if config.ui.show_advanced:
+        st.dataframe(trend, width="stretch", hide_index=True)
+
+
+# --------------------------------------------------------------------------- #
+# 分頁五：系統設定 + 系統資訊
+# --------------------------------------------------------------------------- #
+def render_settings_page(config) -> None:
+    render_settings_tab()
+
+    st.divider()
+    st.markdown("##### 💻 系統資訊")
+    info = ds.build_system_info(
+        st.session_state.started_at, config.traffic.random_seed or 0
+    )
+    metric_row([(key, value, None) for key, value in info], columns=4)
+
+
+# --------------------------------------------------------------------------- #
+# 主程式
+# --------------------------------------------------------------------------- #
+def main() -> None:
+    init_session_state()
+
+    config = get_config()
+    theme = resolve_theme(config.ui.theme)
+    inject_css(theme)
+    template = plotly_template(theme)
+
+    status = "運行中" if st.session_state.optimizer_running else "待命中"
+    hero(
+        "🚦 多模態 AI 智慧城市交通優化系統",
+        f"{st.session_state.operation_mode} · 優化引擎{status} · "
+        f"{config.traffic.num_intersections} 個路口聯合調度",
+    )
+
+    render_sidebar(config)
+
+    tabs = st.tabs(
+        ["📊 即時監控", "🤖 AI 模型", "🚦 交通控制", "📈 效能分析", "⚙️ 系統設定"]
+    )
+
+    with tabs[0]:
+        render_monitoring_tab(config, template)
+    with tabs[1]:
+        render_model_tab(config, template)
+    with tabs[2]:
+        render_control_tab(config, template)
+    with tabs[3]:
+        render_analytics_tab(config, template)
+    with tabs[4]:
+        render_settings_page(config)
+
+    # 「自動更新資料」以前只是個沒有作用的開關，這裡讓它真的會動。
+    if config.ui.auto_refresh:
+        _auto_refresh_ticker(max(1, int(config.ui.refresh_interval_s)))
+
 
 if __name__ == "__main__":
     main()

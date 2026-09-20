@@ -1,0 +1,18 @@
+# Streamlit 介面設定
+# 改完這個檔案要重新啟動 streamlit 才會生效。
+
+[theme]
+base = "light"
+primaryColor = "#3b7dd8"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f6fa"
+textColor = "#1a202c"
+
+[server]
+# 關掉使用統計回傳
+headless = true
+# 存檔後自動重新執行，開發時很方便
+fileWatcherType = "auto"
+
+[browser]
+gatherUsageStats = false

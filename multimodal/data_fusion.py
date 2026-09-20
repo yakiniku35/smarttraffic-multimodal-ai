@@ -1,139 +1,276 @@
+"""多模態資料融合網路（文字 + 影像 + 感測器）。
+
+修正的問題：
+
+1. **維度對不上**：MiniLM 輸出 384 維、ResNet 輸出 2048 維，但
+   ``embedding_dim`` 是 512。原本直接 ``torch.stack`` 三個不同長度的
+   向量會炸掉。改成每個模態都先經過一層投影，統一到 ``embedding_dim``。
+2. **注意力加權廣播錯誤**：``attended_emb`` 形狀 ``[3, B, D]``，
+   ``weights.unsqueeze(-1)`` 卻是 ``[B, 3, 1]``，相乘只有在 B == 3
+   時才不會報錯（而且算出來的結果是錯的）。改成 ``[3, B, 1]``。
+3. ``encode_image`` 裡宣告了 ``preprocess`` 卻從來沒用到 ── 影像根本
+   沒被正規化。改成真的套用正規化，且 resize/crop 移到資料載入階段
+   （模型只負責 normalize，才不會把已經處理好的 batch 再切一次）。
+4. ``pretrained=True`` 在新版 torchvision 已被棄用，改用 ``weights=``。
+5. 文字編碼器原本永遠包在 ``torch.no_grad()`` 裡，等於無法微調；
+   改成由 ``config.freeze_text_encoder`` 決定。
+"""
+
+from __future__ import annotations
+
+import logging
+from contextlib import nullcontext
+from typing import List, Optional, Sequence
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModel
-from torchvision import models, transforms
-import numpy as np
-from typing import Dict, List, Tuple, Optional
+
+logger = logging.getLogger(__name__)
+
+# ImageNet 的標準正規化參數
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+def _build_image_backbone(pretrained: bool):
+    """建立 ResNet-50 骨幹，並處理新舊 torchvision API 的差異。"""
+    from torchvision import models
+
+    try:  # torchvision >= 0.13
+        weights = models.ResNet50_Weights.DEFAULT if pretrained else None
+        return models.resnet50(weights=weights)
+    except AttributeError:  # pragma: no cover - 舊版 torchvision
+        return models.resnet50(pretrained=pretrained)
+
 
 class MultimodalFusionNetwork(nn.Module):
-    """多模態數據融合網路"""
-    
+    """把三種模態的資料編碼後融合成單一向量。"""
+
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.embedding_dim = config.embedding_dim
-        
-        # 文本編碼器
+
+        # ---------------- 文字編碼器 ---------------- #
+        from transformers import AutoModel, AutoTokenizer
+
         self.text_tokenizer = AutoTokenizer.from_pretrained(config.text_model_name)
         self.text_encoder = AutoModel.from_pretrained(config.text_model_name)
-        
-        # 影像編碼器
-        self.image_encoder = models.resnet50(pretrained=True)
-        self.image_encoder.fc = nn.Linear(2048, self.embedding_dim)
-        
-        # 感測器數據編碼器
-        self.sensor_encoder = nn.Sequential(
-            nn.Linear(64, 256),  # 假設64個感測器特徵
-            nn.ReLU(),
-            nn.Linear(256, self.embedding_dim)
+        text_hidden = self.text_encoder.config.hidden_size
+
+        self.freeze_text_encoder = config.freeze_text_encoder
+        if self.freeze_text_encoder:
+            for param in self.text_encoder.parameters():
+                param.requires_grad = False
+            # 同樣要切到 eval，否則 dropout 還是會作用在「凍結」的編碼器上
+            self.text_encoder.eval()
+
+        # 投影層：把各模態原生的維度統一到 embedding_dim
+        self.text_projection = nn.Linear(text_hidden, self.embedding_dim)
+
+        # ---------------- 影像編碼器 ---------------- #
+        backbone = _build_image_backbone(config.pretrained_image_weights)
+        image_hidden = backbone.fc.in_features  # ResNet-50 是 2048
+        backbone.fc = nn.Identity()  # 拿掉分類頭，只留特徵
+        self.image_encoder = backbone
+
+        if config.freeze_image_encoder:
+            for param in self.image_encoder.parameters():
+                param.requires_grad = False
+            # requires_grad=False 只凍結「權重」，不會凍結 BatchNorm 的
+            # running_mean / running_var ── 那兩個是 buffer，只要模組在
+            # train mode，每次 forward 都會被目前這批資料更新。
+            # 不額外呼叫 eval() 的話，「凍結」的編碼器其實還是會被改變。
+            self.image_encoder.eval()
+
+        self.image_projection = nn.Linear(image_hidden, self.embedding_dim)
+
+        # 正規化參數存成 buffer，才會跟著模型一起搬到 GPU
+        self.register_buffer(
+            "image_mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1), persistent=False
         )
-        
-        # 注意力融合機制
-        self.attention_fusion = AttentionFusion(self.embedding_dim)
-        
-        # 輸出層
+        self.register_buffer(
+            "image_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1), persistent=False
+        )
+
+        # ---------------- 感測器編碼器 ---------------- #
+        self.sensor_encoder = nn.Sequential(
+            nn.Linear(config.sensor_input_dim, 256),
+            nn.ReLU(),
+            nn.Dropout(config.dropout),
+            nn.Linear(256, self.embedding_dim),
+        )
+
+        # ---------------- 融合與輸出 ---------------- #
+        self.attention_fusion = AttentionFusion(
+            self.embedding_dim,
+            num_heads=config.num_attention_heads,
+            dropout=config.dropout,
+        )
+
         self.output_layer = nn.Sequential(
             nn.Linear(self.embedding_dim, 256),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(256, 128)
+            nn.Dropout(config.dropout),
+            nn.Linear(256, config.output_dim),
         )
-    
-    def encode_text(self, text_data: List[str]) -> torch.Tensor:
-        """編碼文本數據"""
+
+    def train(self, mode: bool = True):
+        """切換訓練 / 評估模式。
+
+        覆寫的原因：之後任何一次 ``model.train()``（例如訓練迴圈裡的）
+        都會把所有子模組一起切回 train mode，被凍結的編碼器又會開始
+        更新 BatchNorm 統計量。這裡在切換完之後再把它壓回 eval。
+        """
+        super().train(mode)
+        # 用 self.config 而不是 self.freeze_*，因為 __init__ 還沒跑完時
+        # 那些屬性可能還不存在
+        if self.config.freeze_image_encoder:
+            self.image_encoder.eval()
+        if self.config.freeze_text_encoder:
+            self.text_encoder.eval()
+        return self
+
+    # ------------------------------------------------------------------ #
+    # 各模態編碼
+    # ------------------------------------------------------------------ #
+    def encode_text(self, text_data: Sequence[str]) -> torch.Tensor:
+        """編碼文字（例如社群媒體上的路況回報）。"""
+        if not text_data:
+            raise ValueError("text_data 不可以是空的")
+
         inputs = self.text_tokenizer(
-            text_data, 
-            padding=True, 
-            truncation=True, 
+            list(text_data),
+            padding=True,
+            truncation=True,
             return_tensors="pt",
-            max_length=512
+            max_length=512,
         )
-        
-        with torch.no_grad():
+        inputs = {k: v.to(self.text_projection.weight.device) for k, v in inputs.items()}
+
+        # 凍結時才關梯度；要微調就要讓梯度流過去
+        context = torch.no_grad() if self.freeze_text_encoder else nullcontext()
+        with context:
             outputs = self.text_encoder(**inputs)
-            # 使用CLS token的embedding
-            text_embeddings = outputs.last_hidden_state[:, 0, :]
-        
-        return text_embeddings
-    
-    def encode_image(self, image_data: torch.Tensor) -> torch.Tensor:
-        """編碼影像數據"""
-        # 影像預處理
-        preprocess = transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                               std=[0.229, 0.224, 0.225])
-        ])
-        
-        if len(image_data.shape) == 3:
+            # 取 [CLS] token 當作整句的表示
+            pooled = outputs.last_hidden_state[:, 0, :]
+
+        return self.text_projection(pooled)
+
+    def normalize_image(self, image_data: torch.Tensor) -> torch.Tensor:
+        """把 [0, 1] 的影像轉成 ImageNet 正規化後的數值。"""
+        return (image_data - self.image_mean) / self.image_std
+
+    def encode_image(
+        self, image_data: torch.Tensor, normalize: bool = True
+    ) -> torch.Tensor:
+        """編碼影像（例如路口攝影機畫面）。
+
+        預期輸入是 ``[B, 3, H, W]``、數值範圍 [0, 1]。
+        單張影像 ``[3, H, W]`` 也可以，會自動補上 batch 維度。
+        """
+        if image_data.dim() == 3:
             image_data = image_data.unsqueeze(0)
-        
-        # 通過ResNet編碼
-        image_embeddings = self.image_encoder(image_data)
-        return image_embeddings
-    
+        if image_data.dim() != 4:
+            raise ValueError(
+                f"image_data 必須是 [B, 3, H, W] 或 [3, H, W]，收到 {tuple(image_data.shape)}"
+            )
+
+        if normalize:
+            image_data = self.normalize_image(image_data)
+
+        features = self.image_encoder(image_data)
+        return self.image_projection(features)
+
     def encode_sensor(self, sensor_data: torch.Tensor) -> torch.Tensor:
-        """編碼感測器數據"""
+        """編碼 IoT 感測器讀值。"""
+        if sensor_data.dim() == 1:
+            sensor_data = sensor_data.unsqueeze(0)
+
+        expected = self.config.sensor_input_dim
+        if sensor_data.shape[-1] != expected:
+            raise ValueError(
+                f"sensor_data 最後一維必須是 {expected}，收到 {sensor_data.shape[-1]}"
+            )
+
         return self.sensor_encoder(sensor_data)
-    
-    def forward(self, text_data: List[str], 
-                image_data: torch.Tensor, 
-                sensor_data: torch.Tensor) -> torch.Tensor:
-        """前向傳播"""
-        # 編碼各模態數據
+
+    # ------------------------------------------------------------------ #
+    # 前向傳播
+    # ------------------------------------------------------------------ #
+    def forward(
+        self,
+        text_data: Sequence[str],
+        image_data: torch.Tensor,
+        sensor_data: torch.Tensor,
+        return_weights: bool = False,
+    ):
+        """三種模態一起編碼、融合、輸出。
+
+        ``return_weights=True`` 時會多回傳一組融合權重，方便在網頁介面上
+        顯示「這次決策主要參考了哪個資料源」。
+        """
         text_emb = self.encode_text(text_data)
         image_emb = self.encode_image(image_data)
         sensor_emb = self.encode_sensor(sensor_data)
-        
-        # 注意力融合
-        fused_embedding = self.attention_fusion(text_emb, image_emb, sensor_emb)
-        
-        # 輸出預測
-        output = self.output_layer(fused_embedding)
+
+        batch_sizes = {text_emb.shape[0], image_emb.shape[0], sensor_emb.shape[0]}
+        if len(batch_sizes) > 1:
+            raise ValueError(
+                f"三種模態的 batch size 必須相同，目前是 {sorted(batch_sizes)}"
+            )
+
+        fused, weights = self.attention_fusion(text_emb, image_emb, sensor_emb)
+        output = self.output_layer(fused)
+
+        if return_weights:
+            return output, weights
         return output
 
+
 class AttentionFusion(nn.Module):
-    """注意力融合機制"""
-    
-    def __init__(self, embedding_dim: int):
+    """以多頭注意力 + 動態權重做模態融合。"""
+
+    MODALITIES = ("text", "image", "sensor")
+
+    def __init__(self, embedding_dim: int, num_heads: int = 8, dropout: float = 0.1):
         super().__init__()
         self.embedding_dim = embedding_dim
-        
-        # 多頭注意力
+
         self.multihead_attn = nn.MultiheadAttention(
             embed_dim=embedding_dim,
-            num_heads=8,
-            dropout=0.1
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=False,  # 輸入格式是 [序列長度, batch, 維度]
         )
-        
-        # 權重計算
+        self.layer_norm = nn.LayerNorm(embedding_dim)
+
+        # 依三個模態的內容動態算出各自的權重
         self.weight_net = nn.Sequential(
             nn.Linear(embedding_dim * 3, 256),
             nn.ReLU(),
-            nn.Linear(256, 3),
-            nn.Softmax(dim=-1)
+            nn.Linear(256, len(self.MODALITIES)),
         )
-    
-    def forward(self, text_emb: torch.Tensor, 
-                image_emb: torch.Tensor, 
-                sensor_emb: torch.Tensor) -> torch.Tensor:
-        """多模態注意力融合"""
-        
-        # 堆疊所有模態
-        all_embeddings = torch.stack([text_emb, image_emb, sensor_emb], dim=0)
-        
-        # 多頭注意力
-        attended_emb, _ = self.multihead_attn(
-            all_embeddings, all_embeddings, all_embeddings
-        )
-        
-        # 計算融合權重
-        concat_emb = torch.cat([text_emb, image_emb, sensor_emb], dim=-1)
-        weights = self.weight_net(concat_emb)
-        
-        # 加權融合
-        weighted_emb = (attended_emb * weights.unsqueeze(-1)).sum(dim=0)
-        
-        return weighted_emb
+
+    def forward(
+        self,
+        text_emb: torch.Tensor,
+        image_emb: torch.Tensor,
+        sensor_emb: torch.Tensor,
+    ):
+        # [3, B, D]：把三個模態當成長度 3 的序列
+        stacked = torch.stack([text_emb, image_emb, sensor_emb], dim=0)
+
+        attended, _ = self.multihead_attn(stacked, stacked, stacked)
+        # 殘差連接 + LayerNorm，訓練比較穩
+        attended = self.layer_norm(attended + stacked)
+
+        # 動態權重：[B, 3]
+        concat = torch.cat([text_emb, image_emb, sensor_emb], dim=-1)
+        weights = F.softmax(self.weight_net(concat), dim=-1)
+
+        # 關鍵修正：要轉成 [3, B, 1] 才能和 [3, B, D] 正確廣播
+        weighted = (attended * weights.t().unsqueeze(-1)).sum(dim=0)
+
+        return weighted, weights
