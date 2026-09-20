@@ -6,7 +6,14 @@ import json
 
 import pytest
 
-from config import MultimodalConfig, RLConfig, SystemConfig, TrafficConfig, UIConfig
+from config import (
+    MultimodalConfig,
+    RLConfig,
+    SystemConfig,
+    TrafficConfig,
+    UIConfig,
+    load_env_file,
+)
 
 
 def test_default_config_is_valid():
@@ -170,3 +177,53 @@ def test_load_non_object_root_raises_typeerror(tmp_path):
 
     with pytest.raises(TypeError):
         SystemConfig.load(path)
+
+
+@pytest.mark.parametrize("bad", [-0.1, 1.0, 1.5, 2.0])
+def test_rl_validation_rejects_bad_dropout(bad):
+    """RLConfig.dropout 會直接傳給 F.dropout。
+
+    之前只有 MultimodalConfig 檢查 dropout，RLConfig 沒有，
+    所以 dropout=2 會通過驗證，一路到第一次 GNN forward 才爆。
+    """
+    with pytest.raises(ValueError, match="dropout"):
+        RLConfig(dropout=bad).validate()
+
+
+def test_rl_validation_accepts_valid_dropout():
+    for good in (0.0, 0.1, 0.5, 0.99):
+        RLConfig(dropout=good).validate()
+
+
+@pytest.mark.parametrize("kwargs", [{"hidden_dim": 0}, {"gnn_output_dim": -1}])
+def test_rl_validation_rejects_bad_layer_sizes(kwargs):
+    with pytest.raises(ValueError, match="hidden_dim|gnn_output_dim"):
+        RLConfig(**kwargs).validate()
+
+
+def test_load_env_file_reads_dotenv(tmp_path, monkeypatch):
+    """README 與設定頁都說可以用 .env，所以一定要有人真的去讀它。"""
+    pytest.importorskip("dotenv", reason="需要安裝 python-dotenv")
+
+    env = tmp_path / ".env"
+    env.write_text("WEATHER_API_KEY=from-dotenv\n", encoding="utf-8")
+    monkeypatch.delenv("WEATHER_API_KEY", raising=False)
+
+    assert load_env_file(env) is True
+    assert SystemConfig().weather_api_key == "from-dotenv"
+
+
+def test_load_env_file_does_not_override_existing(tmp_path, monkeypatch):
+    """已經 export 的環境變數優先，不該被 .env 蓋掉。"""
+    pytest.importorskip("dotenv", reason="需要安裝 python-dotenv")
+
+    env = tmp_path / ".env"
+    env.write_text("WEATHER_API_KEY=from-dotenv\n", encoding="utf-8")
+    monkeypatch.setenv("WEATHER_API_KEY", "from-shell")
+
+    load_env_file(env)
+    assert SystemConfig().weather_api_key == "from-shell"
+
+
+def test_load_env_file_missing_is_not_an_error(tmp_path):
+    assert load_env_file(tmp_path / "nope.env") is False

@@ -104,6 +104,12 @@ class RLConfig:
             raise ValueError("gamma 必須介於 0（不含）到 1（含）之間")
         if not 0.0 <= self.gae_lambda <= 1.0:
             raise ValueError("gae_lambda 必須介於 0 到 1 之間")
+        # 這個值會直接傳給 F.dropout，超出範圍要等到第一次 forward 才會炸，
+        # 在這裡先擋下來比較好找問題
+        if not 0.0 <= self.dropout < 1.0:
+            raise ValueError("dropout 必須介於 0（含）到 1（不含）之間")
+        if self.hidden_dim <= 0 or self.gnn_output_dim <= 0:
+            raise ValueError("hidden_dim 與 gnn_output_dim 都必須大於 0")
 
 
 @dataclass
@@ -161,6 +167,32 @@ class UIConfig:
 # 總設定
 # --------------------------------------------------------------------------- #
 DEFAULT_CONFIG_PATH = Path("configs/system_config.json")
+DEFAULT_ENV_PATH = Path(".env")
+
+
+def load_env_file(path: str | Path = DEFAULT_ENV_PATH) -> bool:
+    """把 ``.env`` 裡的環境變數載入到 ``os.environ``。
+
+    介面與 README 都告訴使用者可以把 API 金鑰寫進 ``.env``，所以一定
+    要有人真的去讀它，否則那段說明就是錯的。這個函式由兩個進入點呼叫：
+    ``main.py`` 的 ``main()``，以及 ``web_interface/app.py``
+    （因為 ``streamlit run`` 不會經過 main.py）。
+
+    已經存在的環境變數優先，不會被 ``.env`` 蓋掉。
+    沒安裝 python-dotenv 或檔案不存在時回傳 False，不會讓程式中斷。
+    """
+    path = Path(path)
+    if not path.exists():
+        return False
+
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        # 只裝網頁介面相依套件的人可能沒有 python-dotenv，
+        # 這種情況下改用手動 export 就好，不需要讓程式掛掉
+        return False
+
+    return bool(load_dotenv(path, override=False))
 
 
 @dataclass

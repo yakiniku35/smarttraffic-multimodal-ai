@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +27,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from config import load_env_file  # noqa: E402
 from web_interface import data_source as ds  # noqa: E402
 from web_interface.components.metrics import (  # noqa: E402
     metric_row,
@@ -46,6 +46,10 @@ from web_interface.theme import (  # noqa: E402
     plotly_template,
     resolve_theme,
 )
+
+# `streamlit run` 不會經過 main.py，所以這裡要自己載入 .env，
+# 否則設定頁的金鑰狀態永遠顯示「未設定」
+load_env_file()
 
 st.set_page_config(
     page_title="多模態AI智慧城市交通優化系統",
@@ -93,6 +97,38 @@ def refresh_data() -> None:
     """抓下一批資料（把刻度 +1，所有圖表就會跟著更新）。"""
     st.session_state.tick += 1
     st.session_state.tick_loaded_at = datetime.now()
+
+
+def _auto_refresh_ticker(interval_s: int) -> None:
+    """定時自動載入下一批資料。
+
+    重點是**不要用 ``time.sleep()``**。在腳本主體裡 sleep 會把這個
+    工作階段的執行緒一直佔住：使用者在等待期間點任何東西都不會有反應，
+    多人同時使用時更是每個人各佔一條執行緒。
+
+    改用 ``st.fragment(run_every=...)``：Streamlit 會自己安排計時，
+    時間到才執行這個小片段，不阻塞腳本。片段裡再用
+    ``st.rerun(scope="app")`` 讓整頁跟著更新。
+
+    ``run_every`` 只能在套用裝飾器時指定，而間隔是使用者可調的，
+    所以在這裡動態套用（fragment 以函式的 qualname 辨識，每次 rerun
+    重新套用仍然是同一個片段）。
+
+    那個時間判斷不能省。片段的內容在「每一次正常的整頁執行」也會跑，
+    不是只有計時器到點才跑；少了判斷就會變成
+    整頁執行 → 片段 → rerun → 整頁執行 → …的全速迴圈
+    （實測 3 秒的間隔會變成每秒更新約 3 次）。
+    改成只有真的經過設定的秒數才更新，正常那一趟就直接跳過。
+    """
+
+    def _tick() -> None:
+        elapsed = (datetime.now() - st.session_state.tick_loaded_at).total_seconds()
+        if elapsed < interval_s:
+            return
+        refresh_data()
+        st.rerun(scope="app")
+
+    st.fragment(run_every=interval_s)(_tick)()
 
 
 # --------------------------------------------------------------------------- #
@@ -575,12 +611,9 @@ def main() -> None:
     with tabs[4]:
         render_settings_page(config)
 
-    # 「自動更新資料」以前只是個沒有作用的開關，這裡讓它真的會動：
-    # 等待設定的秒數之後把刻度 +1 並重新執行，等同於自己按「更新資料」。
+    # 「自動更新資料」以前只是個沒有作用的開關，這裡讓它真的會動。
     if config.ui.auto_refresh:
-        time.sleep(max(1, int(config.ui.refresh_interval_s)))
-        refresh_data()
-        st.rerun()
+        _auto_refresh_ticker(max(1, int(config.ui.refresh_interval_s)))
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ from typing import Optional
 
 import numpy as np
 
-from config import SystemConfig
+from config import SystemConfig, load_env_file
 
 # 專案根目錄，用來組出絕對路徑
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -191,6 +191,36 @@ def train_system(
 # --------------------------------------------------------------------------- #
 # 推理
 # --------------------------------------------------------------------------- #
+def _rl_config_from_checkpoint(checkpoint: dict, config: SystemConfig):
+    """取出 checkpoint 裡存的 RL 設定，用來重建同樣形狀的網路。
+
+    模型的形狀是由 ``hidden_dim`` / ``gnn_output_dim`` / ``action_dim``
+    決定的，這些值必須和訓練當時一致，否則 ``load_state_dict`` 會因為
+    形狀不符而失敗。舊的 checkpoint 可能沒有存 config，那就退回目前的設定。
+    """
+    saved = (checkpoint.get("config") or {}).get("rl")
+    if not isinstance(saved, dict):
+        logger.warning("checkpoint 沒有存 RL 設定，改用目前的設定重建模型")
+        return config.rl
+
+    from dataclasses import fields as dataclass_fields
+
+    from config import RLConfig
+
+    allowed = {f.name for f in dataclass_fields(RLConfig)}
+    rl_config = RLConfig(**{k: v for k, v in saved.items() if k in allowed})
+
+    changed = [
+        name
+        for name in ("hidden_dim", "gnn_output_dim", "action_dim", "state_dim")
+        if getattr(rl_config, name) != getattr(config.rl, name)
+    ]
+    if changed:
+        logger.info("採用 checkpoint 內的 RL 設定（與目前設定不同：%s）", ", ".join(changed))
+
+    return rl_config
+
+
 def run_inference(config: SystemConfig, use_mock_env: bool = False) -> None:
     """載入訓練好的模型並執行推理。"""
     import torch
@@ -214,11 +244,17 @@ def run_inference(config: SystemConfig, use_mock_env: bool = False) -> None:
     # 我們存的內容（state_dict、dict、int、float）都在允許範圍內。
     checkpoint = torch.load(model_path, map_location=device, weights_only=True)
 
+    # 用訓練當時存下來的 RL 設定來重建模型。
+    # 不這樣做的話，只要訓練時改過 hidden_dim / gnn_output_dim / action_dim，
+    # 這裡就會用預設值建出形狀不同的網路，load_state_dict 直接報
+    # 「size mismatch for critic.0.bias: ... torch.Size([64]) vs torch.Size([128])」。
+    rl_config = _rl_config_from_checkpoint(checkpoint, config)
+
     env = create_environment(config.traffic, force_mock=use_mock_env)
 
     try:
-        config.rl.state_dim = NODE_FEATURE_DIM
-        agent = FederatedPPOAgent(config.rl, env.create_edge_index()).to(device)
+        rl_config.state_dim = NODE_FEATURE_DIM
+        agent = FederatedPPOAgent(rl_config, env.create_edge_index()).to(device)
         agent.load_state_dict(checkpoint["agent"])
         agent.eval()  # 關掉 dropout
 
@@ -322,6 +358,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+
+    # 先載入 .env，後面讀 API 金鑰才拿得到（README 有寫這個用法）
+    load_env_file()
 
     # --config 現在真的會被使用
     config = SystemConfig.load(args.config) if args.config else SystemConfig()

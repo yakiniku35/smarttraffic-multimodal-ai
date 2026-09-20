@@ -67,17 +67,28 @@ def get_config() -> SystemConfig:
     if CONFIG_KEY not in st.session_state:
         config, warning = _load_validated(DEFAULT_CONFIG_PATH)
         st.session_state[CONFIG_KEY] = config
-        st.session_state[SAVED_SNAPSHOT_KEY] = json.dumps(
-            config.to_dict(), sort_keys=True
+        # 只有「真的從檔案讀到設定」才記錄存檔快照。
+        # configs/system_config.json 有被 git-ignore，剛 clone 下來時不存在；
+        # 如果這時候也記快照，介面會顯示「已與檔案同步」，
+        # 但實際上根本沒有檔案可以重新載入。
+        st.session_state[SAVED_SNAPSHOT_KEY] = (
+            json.dumps(config.to_dict(), sort_keys=True)
+            if Path(DEFAULT_CONFIG_PATH).exists() and not warning
+            else None
         )
         st.session_state[LOAD_WARNING_KEY] = warning
     return st.session_state[CONFIG_KEY]
 
 
 def has_unsaved_changes() -> bool:
-    """目前的設定和上次存檔的內容是否不同。"""
-    current = json.dumps(get_config().to_dict(), sort_keys=True)
-    return current != st.session_state.get(SAVED_SNAPSHOT_KEY)
+    """目前的設定和上次存檔的內容是否不同。
+
+    沒有存檔快照（設定檔還不存在）時一律視為「尚未寫入」。
+    """
+    snapshot = st.session_state.get(SAVED_SNAPSHOT_KEY)
+    if snapshot is None:
+        return True
+    return json.dumps(get_config().to_dict(), sort_keys=True) != snapshot
 
 
 def _mark_saved() -> None:
@@ -95,6 +106,23 @@ def _apply(config: SystemConfig) -> Tuple[bool, str]:
 
     st.session_state[CONFIG_KEY] = config
     return True, "設定已套用（尚未寫入檔案）"
+
+
+def _clamped(value, low, high, label: str):
+    """把設定值夾到 widget 允許的範圍內，超出時提醒使用者。
+
+    ``validate()`` 的範圍比介面 widget 寬鬆（例如 learning_rate 只要大於 0
+    就合法，但 ``number_input`` 的上限是 0.1）。設定檔可以手動編輯，
+    值落在兩者之間時 Streamlit 會在建立 widget 當下就丟出例外，
+    整個設定頁打不開。夾住並提示，比讓介面壞掉好。
+    """
+    if value < low:
+        st.caption(f"⚠️ {label} 目前是 {value}，低於介面下限 {low}，已夾到下限顯示。")
+        return low
+    if value > high:
+        st.caption(f"⚠️ {label} 目前是 {value}，高於介面上限 {high}，已夾到上限顯示。")
+        return high
+    return value
 
 
 def _options_including(options: list, current) -> list:
@@ -124,7 +152,7 @@ def _render_rl_section(config: SystemConfig) -> None:
                 "學習率 (learning rate)",
                 min_value=1e-6,
                 max_value=1e-1,
-                value=float(config.rl.learning_rate),
+                value=_clamped(float(config.rl.learning_rate), 1e-6, 1e-1, "學習率"),
                 step=1e-4,
                 format="%.6f",
                 help="每次更新參數的步伐大小，太大訓練會不穩、太小會學很慢。",
@@ -133,7 +161,7 @@ def _render_rl_section(config: SystemConfig) -> None:
                 "批次大小 (batch size)",
                 min_value=8,
                 max_value=4096,
-                value=int(config.rl.batch_size),
+                value=_clamped(int(config.rl.batch_size), 8, 4096, "批次大小"),
                 step=8,
                 help="累積幾筆經驗後才做一次更新。",
             )
@@ -141,14 +169,14 @@ def _render_rl_section(config: SystemConfig) -> None:
                 "每批訓練輪數 (n_epochs)",
                 min_value=1,
                 max_value=50,
-                value=int(config.rl.n_epochs),
+                value=_clamped(int(config.rl.n_epochs), 1, 50, "每批訓練輪數"),
                 help="同一批資料重複學習幾次。",
             )
             clip_range = st.slider(
                 "PPO 裁切範圍 (clip range)",
                 0.05,
                 0.5,
-                float(config.rl.clip_range),
+                _clamped(float(config.rl.clip_range), 0.05, 0.5, "PPO 裁切範圍"),
                 step=0.01,
                 help="限制新舊策略的差距，PPO 穩定訓練的關鍵。",
             )
@@ -158,7 +186,7 @@ def _render_rl_section(config: SystemConfig) -> None:
                 "折扣因子 (gamma)",
                 0.80,
                 0.999,
-                float(config.rl.gamma),
+                _clamped(float(config.rl.gamma), 0.80, 0.999, "折扣因子"),
                 step=0.001,
                 format="%.3f",
                 help="越接近 1，代表越重視長期的回報。",
@@ -167,7 +195,7 @@ def _render_rl_section(config: SystemConfig) -> None:
                 "GAE lambda",
                 0.80,
                 1.0,
-                float(config.rl.gae_lambda),
+                _clamped(float(config.rl.gae_lambda), 0.80, 1.0, "GAE lambda"),
                 step=0.01,
                 help="在偏差與變異之間取捨的參數。",
             )
@@ -175,7 +203,7 @@ def _render_rl_section(config: SystemConfig) -> None:
                 "熵係數 (探索程度)",
                 0.0,
                 0.2,
-                float(config.rl.entropy_coef),
+                _clamped(float(config.rl.entropy_coef), 0.0, 0.2, "熵係數"),
                 step=0.005,
                 format="%.3f",
                 help="越大越鼓勵智能體嘗試沒試過的動作。",
@@ -184,7 +212,7 @@ def _render_rl_section(config: SystemConfig) -> None:
                 "聯邦同步間隔（次更新）",
                 min_value=0,
                 max_value=500,
-                value=int(config.rl.federated_sync_interval),
+                value=_clamped(int(config.rl.federated_sync_interval), 0, 500, "聯邦同步間隔"),
                 help="每幾次更新做一次各地區模型的權重平均；0 表示關閉。",
             )
 
@@ -236,7 +264,7 @@ def _render_multimodal_section(config: SystemConfig) -> None:
                 "Dropout",
                 0.0,
                 0.6,
-                float(config.multimodal.dropout),
+                _clamped(float(config.multimodal.dropout), 0.0, 0.6, "Dropout"),
                 step=0.05,
                 help="訓練時隨機丟棄一部分神經元，用來減少過度擬合。",
             )
@@ -246,7 +274,7 @@ def _render_multimodal_section(config: SystemConfig) -> None:
                 "感測器特徵數",
                 min_value=1,
                 max_value=1024,
-                value=int(config.multimodal.sensor_input_dim),
+                value=_clamped(int(config.multimodal.sensor_input_dim), 1, 1024, "感測器特徵數"),
             )
             freeze_text = st.checkbox(
                 "凍結文字編碼器",
@@ -306,13 +334,13 @@ def _render_traffic_section(config: SystemConfig) -> None:
                 "路口數量",
                 min_value=1,
                 max_value=256,
-                value=int(config.traffic.num_intersections),
+                value=_clamped(int(config.traffic.num_intersections), 1, 256, "路口數量"),
             )
             simulation_time = st.number_input(
                 "單次模擬時長（秒）",
                 min_value=60,
                 max_value=86_400,
-                value=int(config.traffic.simulation_time),
+                value=_clamped(int(config.traffic.simulation_time), 60, 86_400, "單次模擬時長"),
                 step=60,
             )
 
@@ -321,7 +349,7 @@ def _render_traffic_section(config: SystemConfig) -> None:
                 "鄰近路口連線距離（公尺）",
                 100.0,
                 3000.0,
-                float(config.traffic.neighbor_distance_m),
+                _clamped(float(config.traffic.neighbor_distance_m), 100.0, 3000.0, "鄰近路口連線距離"),
                 step=50.0,
                 help="兩個路口距離小於這個值，就會在圖神經網路裡連一條邊。",
             )
@@ -339,7 +367,7 @@ def _render_traffic_section(config: SystemConfig) -> None:
                 "亂數種子",
                 min_value=0,
                 max_value=999_999,
-                value=int(config.traffic.random_seed or 0),
+                value=_clamped(int(config.traffic.random_seed or 0), 0, 999_999, "亂數種子"),
                 help="固定種子可以讓每次執行的結果一樣，方便比較。",
             )
 
@@ -386,11 +414,11 @@ def _render_ui_section(config: SystemConfig) -> None:
                 "圖表高度（像素）",
                 250,
                 700,
-                int(config.ui.chart_height),
+                _clamped(int(config.ui.chart_height), 250, 700, "圖表高度"),
                 step=10,
             )
             decimals = st.slider(
-                "數值小數位數", 0, 3, int(config.ui.decimal_places)
+                "數值小數位數", 0, 3, _clamped(int(config.ui.decimal_places), 0, 3, "小數位數")
             )
 
         with col2:
@@ -403,7 +431,7 @@ def _render_ui_section(config: SystemConfig) -> None:
                 "更新間隔（秒）",
                 1,
                 60,
-                int(config.ui.refresh_interval_s),
+                _clamped(int(config.ui.refresh_interval_s), 1, 60, "更新間隔"),
                 disabled=not auto_refresh,
             )
             show_advanced = st.checkbox(
