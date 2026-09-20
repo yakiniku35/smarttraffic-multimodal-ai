@@ -288,7 +288,20 @@ class SystemConfig:
 
         kwargs: Dict[str, Any] = {}
         for name, sub_cls in sub_configs.items():
-            raw = data.get(name) or {}
+            # 缺少的區塊用預設值；但只要有給，就必須是物件。
+            # 原本寫 `data.get(name) or {}` 有兩個問題：
+            #   {"rl": [1]}  → 往下 .items() 丟出看不懂的 AttributeError
+            #   {"rl": []}   → 因為是 falsey，被當成「沒給」而安靜忽略
+            if name not in data:
+                raw: Dict[str, Any] = {}
+            else:
+                raw = data[name]
+                if not isinstance(raw, dict):
+                    raise TypeError(
+                        f"設定裡的 {name} 區塊必須是物件（{{...}}），"
+                        f"收到 {type(raw).__name__}"
+                    )
+
             allowed = {f.name for f in fields(sub_cls)}
             kwargs[name] = sub_cls(**{k: v for k, v in raw.items() if k in allowed})
 
