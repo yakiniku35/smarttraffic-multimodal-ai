@@ -316,18 +316,27 @@ def test_update_evaluates_loss_without_dropout(config, edge_index):
             action, logprob, value = agent.get_action_and_value(state, edge_index)
         agent.memory.store(state, edge_index, action, logprob, 1.0, False, value)
 
-    states, edges, actions, old_logprobs, *_ = agent.memory.get_batch()
-    flat_states, flat_edges = agent.batch_graphs(states, edges)
+    flat_old_logprobs = agent.memory.get_batch(agent.device)[3].reshape(-1)
+
+    # 讓 update() 不改變參數，避免更新後 ratio 不再等於 1（此處只想檢查 dropout）
+    for group in agent.optimizer.param_groups:
+        group["lr"] = 0.0
 
     agent.train()  # main.py 在呼叫 update() 之前就是這個狀態
-    agent.eval()   # update() 內部會自己切成 eval
-    with torch.no_grad():
-        new_logprobs, _, _ = agent.evaluate_actions(
-            flat_states, flat_edges, actions.reshape(-1)
-        )
 
-    ratio = torch.exp(new_logprobs - old_logprobs.reshape(-1))
-    assert torch.allclose(ratio, torch.ones_like(ratio), atol=1e-6)
+    orig = agent.evaluate_actions
+
+    def wrapped(fs, fe, fa):
+        # update() 內部應該會切到 eval() 以關閉 dropout
+        assert agent.training is False
+        new_logprobs, new_values, entropy = orig(fs, fe, fa)
+        with torch.no_grad():
+            ratio = torch.exp(new_logprobs - flat_old_logprobs)
+            assert torch.allclose(ratio, torch.ones_like(ratio), atol=1e-6)
+        return new_logprobs, new_values, entropy
+
+    agent.evaluate_actions = wrapped  # type: ignore[method-assign]
+    agent.update()
 
 
 def test_update_restores_training_mode(config, edge_index):
