@@ -64,3 +64,32 @@ def test_help_does_not_crash(capsys):
         main.main(["--help"])
     assert exc.value.code == 0
     assert "--mock-env" in capsys.readouterr().out
+
+
+def test_vercel_app_root_returns_html():
+    captured = {}
+
+    def start_response(status, headers):
+        captured["status"] = status
+        captured["headers"] = dict(headers)
+
+    response = b"".join(main.app({"PATH_INFO": "/"}, start_response)).decode("utf-8")
+
+    assert captured["status"] == "200 OK"
+    assert captured["headers"]["Content-Type"].startswith("text/html")
+    assert "SmartTraffic Multimodal AI" in response
+    assert "python main.py --mode web" in response
+
+
+def test_vercel_app_health_returns_json():
+    captured = {}
+
+    def start_response(status, headers):
+        captured["status"] = status
+        captured["headers"] = dict(headers)
+
+    response = b"".join(main.app({"PATH_INFO": "/health"}, start_response)).decode("utf-8")
+
+    assert captured["status"] == "200 OK"
+    assert captured["headers"]["Content-Type"].startswith("application/json")
+    assert response == '{"status":"ok","service":"smarttraffic-multimodal-ai"}'

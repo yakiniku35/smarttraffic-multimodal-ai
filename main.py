@@ -21,12 +21,13 @@
 from __future__ import annotations
 
 import argparse
+import html
 import logging
 import random
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -36,6 +37,124 @@ from config import SystemConfig, load_env_file
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 logger = logging.getLogger(__name__)
+
+
+def _wsgi_json_response(
+    start_response: Callable[[str, list[tuple[str, str]]], None],
+    status: str,
+    body: str,
+) -> list[bytes]:
+    payload = body.encode("utf-8")
+    start_response(
+        status,
+        [
+            ("Content-Type", "application/json; charset=utf-8"),
+            ("Content-Length", str(len(payload))),
+            ("Cache-Control", "no-store"),
+        ],
+    )
+    return [payload]
+
+
+def _wsgi_html_response(
+    start_response: Callable[[str, list[tuple[str, str]]], None],
+    status: str,
+    body: str,
+) -> list[bytes]:
+    payload = body.encode("utf-8")
+    start_response(
+        status,
+        [
+            ("Content-Type", "text/html; charset=utf-8"),
+            ("Content-Length", str(len(payload))),
+            ("Cache-Control", "no-store"),
+        ],
+    )
+    return [payload]
+
+
+def _vercel_html_page() -> str:
+    readme_path = PROJECT_ROOT / "README.md"
+    streamlit_path = PROJECT_ROOT / "web_interface" / "app.py"
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SmartTraffic Multimodal AI</title>
+    <style>
+      body {{
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 0;
+        background: #0f172a;
+        color: #e2e8f0;
+      }}
+      main {{
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 48px 24px;
+      }}
+      h1 {{
+        margin-bottom: 12px;
+      }}
+      p, li {{
+        line-height: 1.6;
+      }}
+      code {{
+        background: rgba(148, 163, 184, 0.18);
+        border-radius: 6px;
+        padding: 0.1rem 0.35rem;
+      }}
+      a {{
+        color: #93c5fd;
+      }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>SmartTraffic Multimodal AI</h1>
+      <p>
+        This Vercel deployment exposes a lightweight health endpoint for the repository.
+        The interactive dashboard is implemented as a Streamlit app and should be started
+        with <code>python main.py --mode web</code> or
+        <code>streamlit run {html.escape(str(streamlit_path.relative_to(PROJECT_ROOT)))}</code>.
+      </p>
+      <ul>
+        <li><a href="/health">Health check</a></li>
+        <li><a href="https://github.com/yakiniku35/smarttraffic-multimodal-ai">Repository</a></li>
+        <li><a href="https://github.com/yakiniku35/smarttraffic-multimodal-ai/blob/main/{html.escape(str(readme_path.relative_to(PROJECT_ROOT)))}">README</a></li>
+      </ul>
+    </main>
+  </body>
+</html>
+"""
+
+
+def vercel_app(environ, start_response):
+    """WSGI entrypoint for Vercel Python deployments."""
+    path = environ.get("PATH_INFO", "/")
+
+    if path == "/health":
+        return _wsgi_json_response(
+            start_response,
+            "200 OK",
+            '{"status":"ok","service":"smarttraffic-multimodal-ai"}',
+        )
+
+    if path in {"/", ""}:
+        return _wsgi_html_response(start_response, "200 OK", _vercel_html_page())
+
+    return _wsgi_json_response(
+        start_response,
+        "404 Not Found",
+        '{"error":"not_found","message":"Use / or /health"}',
+    )
+
+
+# Vercel looks for one of: app / application / handler.
+app = vercel_app
+application = app
+handler = app
 
 
 def setup_logging(config: SystemConfig) -> None:
