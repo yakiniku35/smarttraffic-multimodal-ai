@@ -82,6 +82,15 @@ def _wsgi_html_response(
     return [payload] if send_body else []
 
 
+def _wsgi_empty_response(
+    start_response: Callable[[str, list[tuple[str, str]]], None],
+    status: str,
+    headers: list[tuple[str, str]],
+) -> list[bytes]:
+    start_response(status, headers)
+    return []
+
+
 def _vercel_html_page() -> str:
     readme_path = PROJECT_ROOT / "README.md"
     streamlit_path = PROJECT_ROOT / "web_interface" / "app.py"
@@ -140,19 +149,26 @@ def _vercel_html_page() -> str:
 
 
 def vercel_app(environ: WSGIEnvironment, start_response: StartResponse):
-    """WSGI entrypoint for Vercel Python deployments."""
+    """WSGI entrypoint for Vercel Python deployments.
+
+    Routes:
+    - ``GET /`` returns a small HTML landing page for the repository.
+    - ``GET /health`` returns a JSON health payload.
+    - ``HEAD`` mirrors the matching ``GET`` headers with no body.
+    - ``OPTIONS`` returns ``204 No Content`` plus the supported methods.
+    - Unknown paths return ``404`` JSON.
+    - Unsupported methods return ``405`` JSON with an ``Allow`` header.
+    """
     path = environ.get("PATH_INFO", "/")
     method = environ.get("REQUEST_METHOD", "GET").upper()
     send_body = method != "HEAD"
     allow_header = [("Allow", "GET, HEAD, OPTIONS")]
 
     if method == "OPTIONS":
-        return _wsgi_json_response(
+        return _wsgi_empty_response(
             start_response,
             "204 No Content",
-            "",
-            extra_headers=allow_header,
-            send_body=False,
+            allow_header + [("Cache-Control", "no-store")],
         )
 
     if method not in {"GET", "HEAD"}:
