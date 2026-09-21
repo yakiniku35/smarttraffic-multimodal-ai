@@ -144,13 +144,23 @@ def vercel_app(environ: WSGIEnvironment, start_response: StartResponse):
     path = environ.get("PATH_INFO", "/")
     method = environ.get("REQUEST_METHOD", "GET").upper()
     send_body = method != "HEAD"
+    allow_header = [("Allow", "GET, HEAD, OPTIONS")]
+
+    if method == "OPTIONS":
+        return _wsgi_json_response(
+            start_response,
+            "204 No Content",
+            "",
+            extra_headers=allow_header,
+            send_body=False,
+        )
 
     if method not in {"GET", "HEAD"}:
         return _wsgi_json_response(
             start_response,
             "405 Method Not Allowed",
             '{"error":"method_not_allowed","message":"Use GET or HEAD"}',
-            extra_headers=[("Allow", "GET, HEAD")],
+            extra_headers=allow_header,
             send_body=send_body,
         )
 

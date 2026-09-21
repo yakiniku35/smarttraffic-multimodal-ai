@@ -122,5 +122,21 @@ def test_vercel_app_post_returns_405():
 
     assert captured["status"] == "405 Method Not Allowed"
     assert captured["headers"]["Content-Type"].startswith("application/json")
-    assert captured["headers"]["Allow"] == "GET, HEAD"
+    assert captured["headers"]["Allow"] == "GET, HEAD, OPTIONS"
     assert "method_not_allowed" in response
+
+
+def test_vercel_app_options_returns_allow_header():
+    captured = {}
+
+    def start_response(status, headers):
+        captured["status"] = status
+        captured["headers"] = dict(headers)
+
+    response = b"".join(
+        main.app({"PATH_INFO": "/health", "REQUEST_METHOD": "OPTIONS"}, start_response)
+    )
+
+    assert captured["status"] == "204 No Content"
+    assert captured["headers"]["Allow"] == "GET, HEAD, OPTIONS"
+    assert response == b""
