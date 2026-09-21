@@ -28,6 +28,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Callable, Optional
+from wsgiref.types import StartResponse, WSGIEnvironment
 
 import numpy as np
 
@@ -138,7 +139,7 @@ def _vercel_html_page() -> str:
 """
 
 
-def vercel_app(environ, start_response):
+def vercel_app(environ: WSGIEnvironment, start_response: StartResponse):
     """WSGI entrypoint for Vercel Python deployments."""
     path = environ.get("PATH_INFO", "/")
     method = environ.get("REQUEST_METHOD", "GET").upper()
