@@ -43,6 +43,8 @@ def _wsgi_json_response(
     start_response: Callable[[str, list[tuple[str, str]]], None],
     status: str,
     body: str,
+    *,
+    send_body: bool = True,
 ) -> list[bytes]:
     payload = body.encode("utf-8")
     start_response(
@@ -53,13 +55,15 @@ def _wsgi_json_response(
             ("Cache-Control", "no-store"),
         ],
     )
-    return [payload]
+    return [payload] if send_body else []
 
 
 def _wsgi_html_response(
     start_response: Callable[[str, list[tuple[str, str]]], None],
     status: str,
     body: str,
+    *,
+    send_body: bool = True,
 ) -> list[bytes]:
     payload = body.encode("utf-8")
     start_response(
@@ -70,7 +74,7 @@ def _wsgi_html_response(
             ("Cache-Control", "no-store"),
         ],
     )
-    return [payload]
+    return [payload] if send_body else []
 
 
 def _vercel_html_page() -> str:
@@ -133,21 +137,26 @@ def _vercel_html_page() -> str:
 def vercel_app(environ, start_response):
     """WSGI entrypoint for Vercel Python deployments."""
     path = environ.get("PATH_INFO", "/")
+    send_body = environ.get("REQUEST_METHOD", "GET").upper() != "HEAD"
 
     if path == "/health":
         return _wsgi_json_response(
             start_response,
             "200 OK",
             '{"status":"ok","service":"smarttraffic-multimodal-ai"}',
+            send_body=send_body,
         )
 
     if path in {"/", ""}:
-        return _wsgi_html_response(start_response, "200 OK", _vercel_html_page())
+        return _wsgi_html_response(
+            start_response, "200 OK", _vercel_html_page(), send_body=send_body
+        )
 
     return _wsgi_json_response(
         start_response,
         "404 Not Found",
         '{"error":"not_found","message":"Use / or /health"}',
+        send_body=send_body,
     )
 
 

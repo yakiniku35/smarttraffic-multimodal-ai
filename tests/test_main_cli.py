@@ -93,3 +93,17 @@ def test_vercel_app_health_returns_json():
     assert captured["status"] == "200 OK"
     assert captured["headers"]["Content-Type"].startswith("application/json")
     assert response == '{"status":"ok","service":"smarttraffic-multimodal-ai"}'
+
+
+def test_vercel_app_head_returns_headers_without_body():
+    captured = {}
+
+    def start_response(status, headers):
+        captured["status"] = status
+        captured["headers"] = dict(headers)
+
+    response = b"".join(main.app({"PATH_INFO": "/health", "REQUEST_METHOD": "HEAD"}, start_response))
+
+    assert captured["status"] == "200 OK"
+    assert captured["headers"]["Content-Type"].startswith("application/json")
+    assert response == b""
