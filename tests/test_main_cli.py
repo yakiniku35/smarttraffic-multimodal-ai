@@ -109,6 +109,20 @@ def test_vercel_app_head_returns_headers_without_body():
     assert response == b""
 
 
+def test_vercel_app_root_head_returns_headers_without_body():
+    captured = {}
+
+    def start_response(status, headers):
+        captured["status"] = status
+        captured["headers"] = dict(headers)
+
+    response = b"".join(main.app({"PATH_INFO": "/", "REQUEST_METHOD": "HEAD"}, start_response))
+
+    assert captured["status"] == "200 OK"
+    assert captured["headers"]["Content-Type"].startswith("text/html")
+    assert response == b""
+
+
 def test_vercel_app_post_returns_405():
     captured = {}
 
