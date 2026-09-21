@@ -137,7 +137,16 @@ def _vercel_html_page() -> str:
 def vercel_app(environ, start_response):
     """WSGI entrypoint for Vercel Python deployments."""
     path = environ.get("PATH_INFO", "/")
-    send_body = environ.get("REQUEST_METHOD", "GET").upper() != "HEAD"
+    method = environ.get("REQUEST_METHOD", "GET").upper()
+    send_body = method != "HEAD"
+
+    if method not in {"GET", "HEAD"}:
+        return _wsgi_json_response(
+            start_response,
+            "405 Method Not Allowed",
+            '{"error":"method_not_allowed","message":"Use GET or HEAD"}',
+            send_body=send_body,
+        )
 
     if path == "/health":
         return _wsgi_json_response(
