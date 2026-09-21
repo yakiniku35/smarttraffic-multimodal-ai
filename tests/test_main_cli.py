@@ -122,4 +122,5 @@ def test_vercel_app_post_returns_405():
 
     assert captured["status"] == "405 Method Not Allowed"
     assert captured["headers"]["Content-Type"].startswith("application/json")
+    assert captured["headers"]["Allow"] == "GET, HEAD"
     assert "method_not_allowed" in response

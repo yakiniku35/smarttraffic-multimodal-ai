@@ -44,16 +44,20 @@ def _wsgi_json_response(
     status: str,
     body: str,
     *,
+    extra_headers: Optional[list[tuple[str, str]]] = None,
     send_body: bool = True,
 ) -> list[bytes]:
     payload = body.encode("utf-8")
+    headers = [
+        ("Content-Type", "application/json; charset=utf-8"),
+        ("Content-Length", str(len(payload))),
+        ("Cache-Control", "no-store"),
+    ]
+    if extra_headers:
+        headers.extend(extra_headers)
     start_response(
         status,
-        [
-            ("Content-Type", "application/json; charset=utf-8"),
-            ("Content-Length", str(len(payload))),
-            ("Cache-Control", "no-store"),
-        ],
+        headers,
     )
     return [payload] if send_body else []
 
@@ -145,6 +149,7 @@ def vercel_app(environ, start_response):
             start_response,
             "405 Method Not Allowed",
             '{"error":"method_not_allowed","message":"Use GET or HEAD"}',
+            extra_headers=[("Allow", "GET, HEAD")],
             send_body=send_body,
         )
 
